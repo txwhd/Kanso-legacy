@@ -16,6 +16,7 @@ import { chordLabel, type ShortcutCommand } from "../shortcuts";
 import { useStore, type Tab } from "../store";
 import type { TerminalController } from "../terminal";
 import { getController } from "../terminalRegistry";
+import { dropShellForSession, listenForTerminalFileDrop } from "../terminalFileDrop";
 import { startTerminalSelectionReleaseRecovery } from "../terminalSelection";
 import { isFileSession } from "../types";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
@@ -287,6 +288,33 @@ function TerminalHost({
       observer.disconnect();
     };
   }, [id]);
+
+  useEffect(() => {
+    const element = ref.current;
+    if (
+      !element || !terminal || !visible ||
+      !(tab.info.kind === "ssh" || tab.info.kind === "local") ||
+      tab.state !== "connected"
+    ) {
+      return;
+    }
+    return listenForTerminalFileDrop(
+      element,
+      (text) => {
+        const store = useStore.getState();
+        if (store.tabs.find((item) => item.info.id === id)?.state !== "connected") {
+          return;
+        }
+        store.setActive(id);
+        terminal.focus();
+        // Use xterm's paste path: bracketed paste, stdin lock and the transfer
+        // guard still apply. No newline is added and the clipboard is untouched.
+        terminal.term.paste(text);
+      },
+      (message) => useStore.getState().setStatus(message),
+      dropShellForSession(tab.info),
+    );
+  }, [id, terminal, visible, tab.info.kind, tab.info.address, tab.state]);
 
   useEffect(() => {
     terminal?.setGutterMode(gutterMode);
