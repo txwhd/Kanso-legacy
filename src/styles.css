@@ -3894,6 +3894,34 @@ textarea:focus {
   width: min(520px, calc(100vw - 40px));
 }
 
+.sender-pause {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border-strong);
+  background: var(--bg-panel-alt);
+  flex-shrink: 0;
+}
+
+.sender-pause-message {
+  display: flex;
+  flex: 1 1 280px;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.sender-pause-message span { color: var(--fg-dim); }
+.sender-pause-message code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+.sender-pause-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+
 .host-key-facts {
   display: grid;
   grid-template-columns: auto 1fr;

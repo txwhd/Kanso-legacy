@@ -332,11 +332,11 @@ pub async fn open_session(
     Ok(OpenSessionOutcome::Connected { info })
 }
 
-/// Record the key a host now presents, replacing every `known_hosts` entry
-/// the file held for it, after the user accepted a reported `HostKeyChange`.
+/// Record an explicitly confirmed key. Only a changed-key confirmation may
+/// replace existing entries; first-contact confirmation only adds trust.
 #[tauri::command]
-pub fn accept_host_key(host: String, port: u16, public_key: String) -> Result<()> {
-    session::ssh::accept_host_key(&host, port, &public_key)
+pub fn accept_host_key(host: String, port: u16, public_key: String, replace: bool) -> Result<()> {
+    session::ssh::accept_host_key(&host, port, &public_key, replace)
 }
 
 /// Answers one round of an SSH server's keyboard-interactive challenge (an

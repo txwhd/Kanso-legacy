@@ -84,6 +84,7 @@ interface Active {
   units: SendUnit[];
   timer: number | null;
   stop: StopSignal;
+  unsubscribe: (() => void) | null;
 }
 
 let active: Active | null = null;
@@ -123,7 +124,7 @@ function targetsOf(spec: ScheduleSpec): { ids: string[]; gone: boolean } {
   const tab = tabs.find((candidate) => candidate.info.id === spec.sessionId);
   return {
     ids: tab && tab.state === "connected" ? [tab.info.id] : [],
-    gone: tab === undefined,
+    gone: tab === undefined || tab.state !== "connected",
   };
 }
 
@@ -140,6 +141,7 @@ export function startSchedule(spec: ScheduleSpec): string | null {
   }
   if (units.length === 0) return "enter a command before repeating it";
   if (spec.target === "current" && !spec.sessionId) return "no session selected";
+  if (spec.target === "current" && targetsOf(spec).gone) return "the session is not connected";
 
   stopSchedule();
   const entry: Active = {
@@ -147,8 +149,17 @@ export function startSchedule(spec: ScheduleSpec): string | null {
     units,
     timer: null,
     stop: newStopSignal(),
+    unsubscribe: null,
   };
   active = entry;
+  const watched = new Set(targetsOf(spec).ids);
+  entry.unsubscribe = useStore.subscribe((state) => {
+    if (active !== entry) return;
+    if ([...watched].some((id) => !state.tabs.some((tab) => tab.info.id === id && tab.state === "connected"))) {
+      stopSchedule();
+      state.setStatus("Sender: stopped repeating, a target disconnected or was closed");
+    }
+  });
   notify();
 
   const setStatus = (message: string) => useStore.getState().setStatus(message);
@@ -159,6 +170,7 @@ export function startSchedule(spec: ScheduleSpec): string | null {
     notify();
 
     const { ids, gone } = targetsOf(spec);
+    for (const id of ids) watched.add(id);
     if (gone) {
       stopSchedule();
       setStatus("Sender: stopped repeating, the session was closed");
@@ -166,15 +178,23 @@ export function startSchedule(spec: ScheduleSpec): string | null {
     }
     if (ids.length > 0) {
       try {
-        await sendUnits(ids, entry.units, spec.ending, entry.stop);
+        // The final line also owns the session until completion: the next
+        // tick must not land inside a slow command, password prompt or pager.
+        await sendUnits(ids, entry.units, spec.ending, entry.stop, true);
       } catch (error) {
         setStatus(`Sender: ${error}`);
       }
     }
     if (active !== entry) return;
+    if (entry.stop.stopped) {
+      stopSchedule();
+      setStatus("Sender: stopped repeating");
+      return;
+    }
 
     const sent = entry.state.sent + 1;
     if (spec.times > 0 && sent >= spec.times) {
+      entry.unsubscribe?.();
       active = null;
       notify();
       setStatus(`Sender: repeated the command ${sent} times, done`);
@@ -194,6 +214,7 @@ export function stopSchedule(): void {
   const entry = active;
   if (!entry) return;
   active = null;
+  entry.unsubscribe?.();
   if (entry.timer !== null) window.clearTimeout(entry.timer);
   entry.stop.stop();
   notify();

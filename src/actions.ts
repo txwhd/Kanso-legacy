@@ -515,7 +515,7 @@ function failSession(id: string, message: string): void {
 export async function acceptHostKey(prompt: HostKeyPrompt): Promise<void> {
   await api.acceptHostKey(prompt.change);
   const store = useStore.getState();
-  store.setHostKeyPrompt(null);
+  if (store.hostKeyPrompt === prompt) store.setHostKeyPrompt(null);
   if (!store.tabs.some((tab) => tab.info.id === prompt.sessionId)) return;
   getController(prompt.sessionId)?.writeText(
     `\r\n[accepted new host key ${prompt.change.fingerprint}; reconnecting]\r\n`,

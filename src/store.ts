@@ -492,6 +492,7 @@ interface AppStore {
    * connection.
    */
   hostKeyPrompt: HostKeyPrompt | null;
+  hostKeyQueue: HostKeyPrompt[];
   /** The OpenSSH config being imported, while its chooser is open. */
   sshConfigImport: SshConfigPreview | null;
   /**
@@ -764,6 +765,7 @@ export const useStore = create<AppStore>((set, get) => ({
   error: null,
   errorSessionId: null,
   hostKeyPrompt: null,
+  hostKeyQueue: [],
   sshConfigImport: null,
   authPrompts: [],
   closePrompt: null,
@@ -917,8 +919,11 @@ export const useStore = create<AppStore>((set, get) => ({
       status: clearsSessionError ? "Ready" : current.status,
       error: clearsSessionError ? null : current.error,
       errorSessionId: clearsSessionError ? null : current.errorSessionId,
-      hostKeyPrompt:
-        current.hostKeyPrompt?.sessionId === id ? null : current.hostKeyPrompt,
+      hostKeyPrompt: current.hostKeyPrompt?.sessionId === id
+        ? current.hostKeyQueue.find((prompt) => prompt.sessionId !== id) ?? null
+        : current.hostKeyPrompt,
+      hostKeyQueue: current.hostKeyQueue.filter((prompt) => prompt.sessionId !== id)
+        .slice(current.hostKeyPrompt?.sessionId === id ? 1 : 0),
       authPrompts: current.authPrompts.filter(
         (prompt) => prompt.sessionId !== id,
       ),
@@ -1395,7 +1400,14 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   setHostKeyPrompt(prompt) {
-    set({ hostKeyPrompt: prompt });
+    const current = get();
+    if (!prompt) {
+      set({ hostKeyPrompt: current.hostKeyQueue[0] ?? null, hostKeyQueue: current.hostKeyQueue.slice(1) });
+    } else if (!current.hostKeyPrompt || current.hostKeyPrompt.sessionId === prompt.sessionId) {
+      set({ hostKeyPrompt: prompt });
+    } else {
+      set({ hostKeyQueue: [...current.hostKeyQueue.filter((item) => item.sessionId !== prompt.sessionId), prompt] });
+    }
   },
 
   setSshConfigImport(preview) {

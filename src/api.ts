@@ -150,12 +150,13 @@ export const openSession = (
     transportSessionId: transportSessionId ?? null,
   });
 
-/** Records the key from a reported change as the host's only known key. */
+/** Saves the verified key; first-contact confirmation never replaces another key. */
 export const acceptHostKey = (change: HostKeyChange) =>
   invoke<void>("accept_host_key", {
     host: change.host,
     port: change.port,
     publicKey: change.publicKey,
+    replace: change.reason === "changed",
   });
 
 /**

@@ -192,12 +192,13 @@ pub struct LegacyAlgorithms {
     pub algorithms: Vec<String>,
 }
 
-/// An SSH host whose key no longer matches the one recorded for it in
-/// `known_hosts`. The frontend shows this to the user, who may accept the new
-/// key (see `accept_host_key`) and reconnect.
+/// A first-contact or changed SSH host key requiring an explicit user decision
+/// before it can be saved and the connection retried.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostKeyChange {
+    /// Why confirmation is needed: first contact or an existing key changed.
+    pub reason: &'static str,
     pub host: String,
     pub port: u16,
     /// Algorithm name of the key the server presented, e.g. `ssh-ed25519`.
@@ -207,10 +208,10 @@ pub struct HostKeyChange {
     /// The presented key as an OpenSSH public key line; accepting records
     /// exactly this key, not whatever the server sends next time.
     pub public_key: String,
-    /// Path of the `known_hosts` file holding the conflicting entry.
+    /// Path of the `known_hosts` trust file.
     pub known_hosts: String,
-    /// Line of the conflicting entry in that file.
-    pub line: usize,
+    /// Conflicting entry's line, or None for a previously unknown key.
+    pub line: Option<usize>,
     /// One-line explanation for the terminal and status bar.
     pub message: String,
 }

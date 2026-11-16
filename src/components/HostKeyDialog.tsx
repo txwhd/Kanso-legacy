@@ -18,12 +18,12 @@ function serverKeyFile(keyType: string): string {
 }
 
 /**
- * Shown when an SSH server presents a key that differs from the one recorded
- * for it. The safe answer is the default: Cancel has focus, Esc cancels, and
+ * Shown for unknown or changed SSH host keys. Cancel has focus, Esc cancels, and
  * accepting takes a deliberate click.
  */
 export function HostKeyDialog({ prompt, onAccept, onCancel }: Props) {
   const { change } = prompt;
+  const unknown = change.reason === "unknown";
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
@@ -35,7 +35,7 @@ export function HostKeyDialog({ prompt, onAccept, onCancel }: Props) {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
+      if (event.key === "Escape" && !busy) {
         event.preventDefault();
         event.stopPropagation();
         onCancel();
@@ -44,7 +44,7 @@ export function HostKeyDialog({ prompt, onAccept, onCancel }: Props) {
     // Capture phase so the dialog answers before any global shortcut handler.
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [onCancel]);
+  }, [onCancel, busy]);
 
   const accept = async () => {
     setBusy(true);
@@ -63,36 +63,41 @@ export function HostKeyDialog({ prompt, onAccept, onCancel }: Props) {
       <div
         className="dialog confirm-dialog host-key-dialog"
         role="alertdialog"
+        aria-modal="true"
         aria-labelledby="host-key-title"
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="dialog-header" id="host-key-title">
-          Host Key Changed
+          {unknown ? "Verify Host Key" : "Host Key Changed"}
         </div>
         <div className="dialog-body confirm-dialog-body">
           <span>
             <strong>
               {change.host}:{change.port}
             </strong>{" "}
-            presented a key that does not match the one recorded for it.
+            {unknown
+              ? "has not been trusted with this key. Verify its fingerprint before connecting."
+              : "presented a key that does not match the one recorded for it."}
           </span>
           <dl className="host-key-facts">
             <dt>New key</dt>
             <dd>
               {change.keyType} {change.fingerprint}
             </dd>
-            <dt>Recorded in</dt>
+            <dt>{unknown ? "Save to" : "Recorded in"}</dt>
             <dd>
-              {change.knownHosts}, line {change.line}
+              {change.knownHosts}{change.line !== null ? `, line ${change.line}` : ""}
             </dd>
           </dl>
           <span className="confirm-dialog-hint">
-            Accept only if you expect this — the server was reinstalled, or the
+            {unknown ? <>Compare this fingerprint with a trusted server console or administrator using{" "}
+              <code>ssh-keygen -lf {serverKeyFile(change.keyType)}</code>.
+              Trusting saves this exact key before reconnecting.</> : <>Accept only if you expect this — the server was reinstalled, or the
             address now belongs to a different machine. A changed key can also
             mean the connection is being intercepted; when in doubt, cancel and
             compare the fingerprint with{" "}
             <code>ssh-keygen -lf {serverKeyFile(change.keyType)}</code> on the
-            server. Accepting replaces every key recorded for this host.
+            server. Accepting replaces every key recorded for this host.</>}
           </span>
           {error && <div className="dialog-error">{error}</div>}
         </div>
@@ -111,11 +116,11 @@ export function HostKeyDialog({ prompt, onAccept, onCancel }: Props) {
           </button>
           <button
             type="button"
-            className="btn is-danger"
+            className={unknown ? "btn is-primary" : "btn is-danger"}
             onClick={() => void accept()}
             disabled={busy}
           >
-            {busy ? "Accepting…" : "Accept New Key"}
+            {busy ? "Saving…" : unknown ? "Trust and Connect" : "Accept New Key"}
           </button>
         </div>
       </div>

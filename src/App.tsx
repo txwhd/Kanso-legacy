@@ -35,6 +35,7 @@ import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { SshConfigImportDialog } from "./components/SshConfigImportDialog";
 import { Splitter } from "./components/Splitter";
 import { StatusBar } from "./components/StatusBar";
+import { SenderPauseNotice } from "./components/SenderPauseNotice";
 import { TabRail } from "./components/TabRail";
 import { UpdateDialog } from "./components/UpdateDialog";
 import { Workspace } from "./components/Workspace";
@@ -535,6 +536,7 @@ export default function App() {
             </>
           )}
 
+          <SenderPauseNotice />
           <StatusBar />
         </div>
       </div>
@@ -592,6 +594,7 @@ export default function App() {
 
       {hostKeyPrompt && (
         <HostKeyDialog
+          key={`${hostKeyPrompt.sessionId}:${hostKeyPrompt.change.fingerprint}`}
           prompt={hostKeyPrompt}
           onAccept={() => acceptHostKey(hostKeyPrompt)}
           onCancel={() => setHostKeyPrompt(null)}

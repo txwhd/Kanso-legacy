@@ -398,7 +398,7 @@ export class TerminalController {
   private commandOutputAdvanced = false;
   private commandRunning = false;
   /** Callers waiting for the running command to return; see `waitForCommand`. */
-  private commandWaiters: (() => void)[] = [];
+  private commandWaiters: ((result: "complete" | "closed") => void)[] = [];
   /** 每条命令块分割线的 marker，按时间从旧到新排列。 */
   private commandStarts: CommandDivider[] = [];
   /** 当前 prompt 已由 OSC 133 A 创建分割线，命令提交时不得重复登记。 */
@@ -1080,20 +1080,26 @@ export class TerminalController {
   /**
    * Resolves once the command in progress has returned to its prompt — the
    * Sender waits for that before the next line of a script — or after
-   * `timeoutMs`, and at once while nothing is running. The end of the
-   * session ends the wait as well, since locking resets the tracking.
+   * `timeoutMs`. A timeout, cancellation and a closed session are distinct
+   * from a returned prompt so a script cannot mistake them for completion.
    */
-  waitForCommand(timeoutMs: number): Promise<void> {
-    if (!this.commandRunning) return Promise.resolve();
+  waitForCommand(
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<"complete" | "timeout" | "closed" | "cancelled"> {
+    if (this.disposed || this.locked) return Promise.resolve("closed");
+    if (signal?.aborted) return Promise.resolve("cancelled");
+    if (!this.commandRunning) return Promise.resolve("complete");
     return new Promise((resolve) => {
-      const done = () => {
+      const done = (result: "complete" | "timeout" | "closed" | "cancelled") => {
         window.clearTimeout(timer);
-        resolve();
-      };
-      const timer = window.setTimeout(() => {
+        signal?.removeEventListener("abort", cancelled);
         this.commandWaiters = this.commandWaiters.filter((w) => w !== done);
-        resolve();
-      }, timeoutMs);
+        resolve(result);
+      };
+      const cancelled = () => done("cancelled");
+      const timer = window.setTimeout(() => done("timeout"), timeoutMs);
+      signal?.addEventListener("abort", cancelled, { once: true });
       this.commandWaiters.push(done);
     });
   }
@@ -1686,11 +1692,11 @@ export class TerminalController {
     // program painted, which history would then record as a command.
     this.dropAnchor();
     const kind = this.aiSession ? "ai" : "command";
-    this.resetCommandTracking();
+    this.resetCommandTracking("complete");
     if (!this.disposed) this.callbacks.onCommandState("complete", kind);
   }
 
-  private resetCommandTracking() {
+  private resetCommandTracking(result: "complete" | "closed" = "closed") {
     this.commandMarker?.dispose();
     this.commandMarker = null;
     this.commandPrompt = "";
@@ -1703,7 +1709,7 @@ export class TerminalController {
     if (!this.disposed) this.callbacks.onAiTool?.(null);
     const waiters = this.commandWaiters;
     this.commandWaiters = [];
-    for (const waiter of waiters) waiter();
+    for (const waiter of waiters) waiter(result);
   }
 
   private emitCommandState(state: "idle" | "running" | "complete") {

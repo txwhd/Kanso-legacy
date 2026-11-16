@@ -92,8 +92,9 @@ export interface LegacyAlgorithms {
   algorithms: string[];
 }
 
-/** An SSH host whose key no longer matches the one recorded in known_hosts. */
+/** An unknown or changed SSH host key awaiting explicit confirmation. */
 export interface HostKeyChange {
+  reason: "unknown" | "changed";
   host: string;
   port: number;
   /** Algorithm of the presented key, e.g. "ssh-ed25519". */
@@ -102,9 +103,9 @@ export interface HostKeyChange {
   fingerprint: string;
   /** The presented key as an OpenSSH public key line; this exact key is recorded on accept. */
   publicKey: string;
-  /** known_hosts file and line holding the conflicting entry. */
+  /** Trust file and conflicting line, or null for a previously unknown key. */
   knownHosts: string;
-  line: number;
+  line: number | null;
   /** One-line explanation for the terminal and status bar. */
   message: string;
 }

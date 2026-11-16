@@ -80,6 +80,27 @@ describe("shell prompt recognition", () => {
 });
 
 describe("terminal command activity", () => {
+  it("distinguishes a timeout, returned prompt, cancellation and session close", async () => {
+    const controller = createController([]);
+    const prompt = "alice@server:~/work$ ";
+    await write(controller, prompt);
+    controller.noteCommandSent("sleep 60");
+    expect(await controller.waitForCommand(1)).toBe("timeout");
+    const returned = controller.waitForCommand(1000);
+    await write(controller, `sleep 60\r\n${prompt}`);
+    expect(await returned).toBe("complete");
+
+    controller.noteCommandSent("sleep 60");
+    const abort = new AbortController();
+    const cancelled = controller.waitForCommand(1000, abort.signal);
+    abort.abort();
+    expect(await cancelled).toBe("cancelled");
+    const closed = controller.waitForCommand(1000);
+    controller.setLocked(true);
+    expect(await closed).toBe("closed");
+    expect(await controller.waitForCommand(1000)).toBe("closed");
+  });
+
   it("stays running through quiet output and completes on the returned prompt", async () => {
     const states: string[] = [];
     const controller = createController(states);

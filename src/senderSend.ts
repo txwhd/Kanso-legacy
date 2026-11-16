@@ -1,4 +1,6 @@
 import * as api from "./api";
+import { requestSenderPause } from "./senderPause";
+import { useStore } from "./store";
 import type { SendUnit } from "./senderUnits";
 import { getController } from "./terminalRegistry";
 import type { LineEnding } from "./types";
@@ -10,18 +12,7 @@ import type { LineEnding } from "./types";
 // slow command are done before the next line arrives, instead of the whole
 // script landing as typeahead that a password prompt or a pager would eat.
 
-/**
- * Pause between lines the terminal cannot track — no line ending, or an
- * agentic CLI holding the terminal — the way a paste is paced for a far
- * end that reports no prompt.
- */
-export const LINE_GAP_MS = 100;
-/**
- * Longest wait for a tracked line's prompt before the next line goes
- * anyway: a prompt the heuristics never recognise again must not hang the
- * script, and typeahead is what a plain paste would have done from the
- * start.
- */
+/** A missing prompt pauses the script; elapsed time never authorizes a write. */
 export const LINE_TIMEOUT_MS = 30_000;
 
 /** Lets a send in progress be abandoned between lines. */
@@ -29,10 +20,12 @@ export interface StopSignal {
   readonly stopped: boolean;
   stop(): void;
   readonly promise: Promise<void>;
+  readonly signal: AbortSignal;
 }
 
 export function newStopSignal(): StopSignal {
   let stopped = false;
+  const controller = new AbortController();
   let resolve: () => void = () => undefined;
   const promise = new Promise<void>((done) => {
     resolve = done;
@@ -43,9 +36,11 @@ export function newStopSignal(): StopSignal {
     },
     stop() {
       stopped = true;
+      controller.abort();
       resolve();
     },
     promise,
+    signal: controller.signal,
   };
 }
 
@@ -70,15 +65,34 @@ export async function sendUnits(
   units: SendUnit[],
   ending: LineEnding,
   stop: StopSignal,
+  waitForLast = false,
 ): Promise<SendOutcome> {
   const sent = ids.filter(
-    (id) => !busy.has(id) && !getController(id)?.isTransferActive(),
+    (id) => !busy.has(id) && !getController(id)?.isTransferActive()
+      && useStore.getState().tabs.some((tab) => tab.info.id === id && tab.state === "connected"),
   );
   const skipped = ids.filter((id) => !sent.includes(id));
   for (const id of sent) busy.add(id);
+  const unsubscribe = useStore.subscribe((state) => {
+    if (sent.some((id) => !state.tabs.some((tab) => tab.info.id === id && tab.state === "connected"))) {
+      stop.stop();
+    }
+  });
   try {
-    await Promise.all(sent.map((id) => sendSequence(id, units, ending, stop)));
+    // Keep ownership until every target has stopped, including a sibling
+    // cancelled after a write failure in a broadcast.
+    const results = await Promise.allSettled(sent.map(async (id) => {
+      try {
+        await sendSequence(id, units, ending, stop, waitForLast);
+      } catch (error) {
+        stop.stop();
+        throw error;
+      }
+    }));
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed?.status === "rejected") throw failed.reason;
   } finally {
+    unsubscribe();
     for (const id of sent) busy.delete(id);
   }
   return { sent, skipped };
@@ -89,6 +103,7 @@ async function sendSequence(
   units: SendUnit[],
   ending: LineEnding,
   stop: StopSignal,
+  waitForLast: boolean,
 ): Promise<void> {
   for (let index = 0; index < units.length; index += 1) {
     if (stop.stopped) return;
@@ -106,13 +121,43 @@ async function sendSequence(
       if (tracked) controller.cancelCommandSent();
       throw error;
     }
-    if (index === units.length - 1) return;
-    await Promise.race([
-      tracked ? controller.waitForCommand(LINE_TIMEOUT_MS) : delay(LINE_GAP_MS),
-      stop.promise,
-    ]);
+    if (index === units.length - 1 && !waitForLast) return;
+    while (!stop.stopped) {
+      const result = tracked
+        ? await controller.waitForCommand(LINE_TIMEOUT_MS, stop.signal)
+        : await waitUntracked(id, index, units, stop);
+      if (result === "complete" || result === "force") break;
+      if (result === "closed" || result === "cancelled" || stop.stopped) {
+        stop.stop();
+        return;
+      }
+      // Untrackable sessions have already asked before waiting. They must
+      // never turn a delay into an assumed successful command.
+      if (!tracked) continue;
+      const decision = await requestSenderPause({
+        sessionId: id, nextLine: units[index + 1] ?? null, reason: "timeout",
+      }, stop.signal);
+      if (decision === "force") break;
+      if (decision === "stop") { stop.stop(); return; }
+    }
   }
 }
 
-const delay = (ms: number) =>
-  new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+async function waitUntracked(id: string, index: number, units: SendUnit[], stop: StopSignal) {
+  const decision = await requestSenderPause({
+    sessionId: id, nextLine: units[index + 1] ?? null, reason: "untracked",
+  }, stop.signal);
+  if (decision === "stop") { stop.stop(); return "cancelled"; }
+  if (decision === "force") return "force";
+  await new Promise<void>((resolve) => {
+    const done = () => {
+      window.clearTimeout(timer);
+      stop.signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = window.setTimeout(done, LINE_TIMEOUT_MS);
+    stop.signal.addEventListener("abort", done, { once: true });
+    if (stop.stopped) done();
+  });
+  return "timeout";
+}
