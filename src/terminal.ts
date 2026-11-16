@@ -22,6 +22,7 @@ import { patchImeInput } from "./imePatch";
 import { IS_MAC, IS_WINDOWS } from "./platform";
 import { matchAppShortcut } from "./shortcuts";
 import { SEARCH_HIGHLIGHT_LIMIT } from "./terminalSearch";
+import { terminalPathsText, type PathShell } from "./terminalPaths";
 import {
   allowsTableHeaderColors,
   isShellPrompt,
@@ -113,22 +114,6 @@ const LINE_TIME_SLACK = 4096;
  */
 const TERMINAL_REPORT =
   /^(?:\x1b\[[?>]?[0-9;]*(?:[cnRtIO]|\$y)|\x1b\[<[0-9;]*[Mm]|\x1b\[M[\s\S]{3}|\x1b\][0-9]+;[\s\S]*?(?:\x07|\x1b\\)|\x1bP[\s\S]*?\x1b\\)$/;
-
-/** Warp 用于保持 POSIX shell 路径语义的特殊字符集。 */
-const POSIX_PATH_ESCAPE = /([ "$'\\#=\[\]!><|;{}()*?&`~]|\n|\t)/g;
-/** PowerShell 的转义集不包含反斜杠，但包含数组和列表操作符。 */
-const POWERSHELL_PATH_ESCAPE = /([ "$'#=\[\]!><|;{}()*&`@,]|\n|\t)/g;
-
-/**
- * 把复制或拖入的文件路径组合成一次终端粘贴。AI CLI 需要原始路径做附件识别；
- * 普通 shell 则必须转义空格等元字符，避免粘贴后的参数被拆分或展开。
- */
-function clipboardPathsText(paths: string[], verbatim: boolean): string {
-  if (verbatim) return paths.join(" ");
-  const pattern = IS_WINDOWS ? POWERSHELL_PATH_ESCAPE : POSIX_PATH_ESCAPE;
-  const replacement = IS_WINDOWS ? "`$1" : "\\$1";
-  return paths.map((path) => path.replace(pattern, replacement)).join(" ");
-}
 
 /** A working directory the shell announced with an OSC sequence. */
 export interface ReportedCwd {
@@ -402,6 +387,7 @@ export class TerminalController {
   private themeMode: ThemeMode;
   private scrollback: number;
   private locked = false;
+  private pathShell: PathShell = "posix";
   /** Command history capture + completion popup. Opt-in via the Edit menu. */
   private suggestionsOn = false;
   private inputAnchor: InputAnchor | null = null;
@@ -1224,10 +1210,18 @@ export class TerminalController {
     this.term.options.rightClickSelectsWord = action === "menu";
   }
 
+  /** Use the session's startup shell rather than the desktop OS for paths. */
+  setPathShell(shell: PathShell) {
+    this.pathShell = shell;
+  }
+
   /** 文件拖放与剪贴板复用同一路径转义和 xterm bracketed paste。 */
   pastePaths(paths: string[]) {
-    if (paths.length > 0) {
-      this.term.paste(clipboardPathsText(paths, this.aiSession));
+    if (paths.length === 0) return;
+    try {
+      this.term.paste(terminalPathsText(paths, this.pathShell, this.aiSession));
+    } catch (error) {
+      this.showTransferNotice(`Paste failed: ${errorMessage(error)}`, "error");
     }
   }
 

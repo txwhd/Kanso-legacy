@@ -17,6 +17,7 @@ import { chordLabel, type ShortcutCommand } from "../shortcuts";
 import { useStore, type Tab } from "../store";
 import type { TerminalController } from "../terminal";
 import { getController } from "../terminalRegistry";
+import { pathShellForSession } from "../terminalPaths";
 import { startTerminalSelectionReleaseRecovery } from "../terminalSelection";
 import { isFileSession } from "../types";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
@@ -292,7 +293,7 @@ function TerminalHost({
   // 原生文件拖放由 Tauri 接收，不会变成 xterm 的文本粘贴事件。
   // 按松手处的实际元素命中终端，分屏、文件面板和模态框各自处理输入。
   useEffect(() => {
-    if (!terminal || !visible) return;
+    if (!terminal || !visible || tab.state !== "connected") return;
     let live = true;
     const unlisten = getCurrentWebview().onDragDropEvent(({ payload }) => {
       if (!live || payload.type !== "drop" || payload.paths.length === 0) return;
@@ -302,7 +303,9 @@ function TerminalHost({
         : payload.position;
       const target = document.elementFromPoint(position.x, position.y);
       if (!target || !ref.current?.contains(target)) return;
-      useStore.getState().setActive(id);
+      const store = useStore.getState();
+      if (store.tabs.find((item) => item.info.id === id)?.state !== "connected") return;
+      store.setActive(id);
       terminal.focus();
       terminal.pastePaths(payload.paths);
     });
@@ -313,7 +316,11 @@ function TerminalHost({
       live = false;
       void unlisten.then((off) => off()).catch(() => {});
     };
-  }, [id, terminal, visible]);
+  }, [id, terminal, visible, tab.state]);
+
+  useEffect(() => {
+    terminal?.setPathShell(pathShellForSession(tab.info));
+  }, [terminal, tab.info.kind, tab.info.address]);
 
   useEffect(() => {
     terminal?.setGutterMode(gutterMode);

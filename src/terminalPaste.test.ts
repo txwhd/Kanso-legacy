@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { PathShell } from "./terminalPaths";
 
 const { readClipboardContent } = vi.hoisted(() => ({
   readClipboardContent: vi.fn(),
@@ -126,6 +127,49 @@ describe("终端剪贴板图片粘贴", () => {
 
 
 describe("终端文件路径粘贴", () => {
+  it.each([
+    ["posix", String.raw`C:\\My\ files\\a.txt`],
+    ["powershell", String.raw`"C:\My files\a.txt"`],
+    ["cmd", String.raw`"C:\My files\a.txt"`],
+  ] as [PathShell, string][])("拖放和剪贴板文件均使用 %s 会话格式", async (shell, expected) => {
+    const controller = createController([]);
+    controller.setPathShell(shell);
+    const paste = vi.spyOn(controller.term, "paste").mockImplementation(() => {});
+    const paths = [String.raw`C:\My files\a.txt`];
+    controller.pastePaths(paths);
+    expect(paste).toHaveBeenLastCalledWith(expected);
+    readClipboardContent.mockResolvedValue({ text: "ignored", paths, hasImage: false });
+    controller.pasteFromClipboard();
+    await vi.waitFor(() => expect(paste).toHaveBeenCalledTimes(2));
+    expect(paste).toHaveBeenLastCalledWith(expected);
+  });
+
+  it("路径校验失败时整批不发送并显示错误，AI 会话仍接收原始普通路径", () => {
+    const controller = createController([]);
+    const paste = vi.spyOn(controller.term, "paste").mockImplementation(() => {});
+    const notice = vi.spyOn(controller as unknown as {
+      showTransferNotice(message: string, kind: string): void;
+    }, "showTransferNotice");
+    controller.pastePaths(["/tmp/good", "/tmp/bad\nname"]);
+    expect(paste).not.toHaveBeenCalled();
+    expect(notice).toHaveBeenLastCalledWith(expect.stringContaining("control characters"), "error");
+    controller.setPathShell("cmd");
+    controller.pastePaths([String.raw`C:\100%.txt`]);
+    expect(paste).not.toHaveBeenCalled();
+    expect(notice).toHaveBeenLastCalledWith(expect.stringContaining("CMD"), "error");
+    enterAiSession(controller, { id: "claude", label: "Claude", color: "#d97757" });
+    controller.pastePaths([String.raw`C:\My files\100%.png`]);
+    expect(paste).toHaveBeenCalledExactlyOnceWith(String.raw`C:\My files\100%.png`);
+  });
+
+  it("路径仍遵守 xterm 的输入锁", () => {
+    const output: string[] = [];
+    const controller = createController(output);
+    controller.term.options.disableStdin = true;
+    controller.pastePaths(["/tmp/file"]);
+    expect(output).toEqual([]);
+  });
+
   it("将含空格、中文和 shell 特殊字符的文件与文件夹转义后一次粘贴", () => {
     const controller = createController([]);
     const paste = vi.spyOn(controller.term, "paste").mockImplementation(() => {});

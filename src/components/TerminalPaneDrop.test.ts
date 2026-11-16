@@ -30,8 +30,8 @@ let elementFromPoint: ReturnType<typeof vi.fn>;
 
 function controller() {
   return {
-    attach: vi.fn(), dispose: vi.fn(), focus: vi.fn(), fit: vi.fn(),
-    pastePaths: vi.fn(), setGutterMode: vi.fn(), setFontSize: vi.fn(),
+    attach: vi.fn(), dispose: vi.fn(), focus: vi.fn(), fit: vi.fn(), setLocked: vi.fn(),
+    pastePaths: vi.fn(), setPathShell: vi.fn(), setGutterMode: vi.fn(), setFontSize: vi.fn(),
     setFontFamily: vi.fn(), setScrollback: vi.fn(), setCursor: vi.fn(),
     setSuggestions: vi.fn(), setRightClickAction: vi.fn(), setVisible: vi.fn(),
   };
@@ -99,6 +99,53 @@ afterEach(() => {
 });
 
 describe("终端原生文件拖放", () => {
+  it.each(["closed", "error", "connecting"] as const)("%s 会话不接收文件拖放", async (state) => {
+    useStore.setState((store) => ({
+      tabs: store.tabs.map((tab) => ({ ...tab, state })),
+    }));
+    await render();
+    elementFromPoint.mockReturnValue(container.querySelector(".term-pane"));
+    drop();
+    expect(handlers.size).toBe(0);
+    expect(first.pastePaths).not.toHaveBeenCalled();
+    expect(second.pastePaths).not.toHaveBeenCalled();
+  });
+
+  it("发送前复查连接状态，断开时释放监听，重连后恢复", async () => {
+    await render();
+    elementFromPoint.mockReturnValue(container.querySelector(".term-pane"));
+    // Exercise the guard before React has committed the new tab props.
+    act(() => useStore.getState().applyState("drop-0", "closed"));
+    drop();
+    expect(first.pastePaths).not.toHaveBeenCalled();
+    await render();
+    expect(handlers.size).toBe(1);
+    act(() => useStore.getState().applyState("drop-0", "connected"));
+    await render();
+    drop();
+    expect(first.pastePaths).toHaveBeenCalledOnce();
+  });
+
+  it("用服务端返回的实际本地启动命令配置路径格式，SSH 使用 POSIX", async () => {
+    useStore.setState((store) => ({
+      tabs: store.tabs.map((tab, index) => ({
+        ...tab, info: {
+          ...tab.info, kind: index === 0 ? "local" : "ssh",
+          address: index === 0 ? '"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -NoLogo' : "host:22",
+        },
+      })),
+    }));
+    await render();
+    expect(first.setPathShell).toHaveBeenLastCalledWith("powershell");
+    expect(second.setPathShell).toHaveBeenLastCalledWith("posix");
+    useStore.setState((store) => ({
+      tabs: store.tabs.map((tab) => ({ ...tab, info: { ...tab.info, address: "cmd.exe" } })),
+    }));
+    await render();
+    expect(first.setPathShell).toHaveBeenLastCalledWith("cmd");
+    expect(second.setPathShell).toHaveBeenLastCalledWith("posix");
+  });
+
   it("Retina Mac 按松手位置向对应终端粘贴文件及文件夹路径并切换焦点", async () => {
     await render();
     const pane = container.querySelectorAll(".term-pane")[0];
