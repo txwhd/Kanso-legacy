@@ -100,6 +100,16 @@ XMODEM 没有可供检测的握手，需要从 **Session → File Transfer** 菜
 
 上表中的快捷键都可以在 **View → Keyboard Shortcuts…** 里重新绑定：点击某个命令的按键，再按下想要的组合即可，也可以清空让该命令不绑定任何按键；只有标签数字键例外。复制 / 粘贴 / 全选也在表里，习惯 `Ctrl+Insert` / `Shift+Insert` 或直接用 `Ctrl+C` / `Ctrl+V` 的人可以照旧；复制键若是单纯的 `Ctrl+字母`，没有选区时仍会发给 Shell，所以 `Ctrl+C` 照样能中断程序。**Help → Restore Default Settings…** 会把整张表恢复为缺省值。
 
+## MCP 共享终端（第一版）
+
+在状态栏点击 **Enable MCP**，MCP 即可发现所有已连接终端，名称默认取标签名。
+悬停 **MCP On** 可复制 Codex / DeepSeek Harness 的原生 stdio 配置，无需安装 Node.js。
+AI 通过 `kanso_select_session` 选择终端后才锁定该标签的键盘、粘贴和 Sender，
+其他标签照常操作。选中后可执行非交互式 POSIX 命令、查询输出和退出码，
+无需重新认证；暂不提供专用文件操作工具。支持同时选择多个终端。
+点击 **Release / Take Control** 接管单个终端，或关闭状态旁的独立 MCP 开关并全部释放。
+配置示例、支持范围和恢复方式见 [MCP 使用说明](docs/mcp.md)。
+
 ## 发布
 
 | 平台 | 安装包 |

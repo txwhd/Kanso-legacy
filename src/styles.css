@@ -1,5 +1,23 @@
 @import "@xterm/xterm/css/xterm.css";
 
+.dialog.mcp-config-dialog { width: min(720px, calc(100vw - 40px)); max-height: calc(100vh - 40px); display: flex; flex-direction: column; }
+.mcp-config-body { display: flex; flex-direction: column; gap: 12px; overflow: auto; min-height: 0; line-height: 1.6; }
+.mcp-config-body p { margin: 0; color: var(--fg-dim); }
+.mcp-config-body > .btn { align-self: flex-start; }
+.mcp-config-code { width: 100%; min-height: 220px; flex-shrink: 0; resize: vertical; white-space: pre; font-family: var(--font-mono, monospace); font-size: 12px; }
+.mcp-switch-info { position: relative; display: flex; align-items: center; gap: 6px; }
+.mcp-status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--fg-faint); }
+.mcp-status.is-enabled .mcp-status-dot { background: var(--green); }
+.mcp-status.has-error .mcp-status-dot { background: var(--red); }
+.mcp-toggle { display: inline-flex; align-items: center; flex: 0 0 28px; width: 28px; height: 16px; padding: 2px; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--bg-field); cursor: pointer; }
+.mcp-toggle[aria-checked="true"] { background: var(--accent); border-color: var(--accent); }
+.mcp-toggle-thumb { width: 10px; height: 10px; border-radius: 50%; background: var(--fg-dim); transform: translateX(0); }
+.mcp-toggle[aria-checked="true"] .mcp-toggle-thumb { background: #fff; transform: translateX(12px); }
+.mcp-toggle:disabled { opacity: .5; cursor: default; }
+.mcp-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.dialog.mcp-config-popover { position: fixed; right: 12px; bottom: 34px; z-index: 180; width: min(620px, calc(100vw - 24px)); max-height: calc(100vh - 50px); white-space: normal; }
+.mcp-config-popover .mcp-config-code { min-height: 170px; }
+
 /* The dark palette follows VS Code Dark Modern: the editor surface (#1f1f1f)
    inside one neutral chrome gray (#181818) with #2b2b2b borders, #313131
    input fields, a single blue accent (#0078d4) with white-on-blue primaries,
@@ -4912,4 +4930,27 @@ textarea:focus {
 
 .about-link:hover {
   color: var(--fg);
+}
+
+.mcp-notices {
+  flex: 0 0 auto;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.mcp-idle {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  color: var(--fg-dim);
+}
+
+.mcp-tab-badge {
+  flex: 0 0 auto;
+  margin-left: 6px;
+  padding: 1px 4px;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  color: var(--accent);
+  font-size: 10px;
 }

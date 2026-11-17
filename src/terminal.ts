@@ -387,6 +387,9 @@ export class TerminalController {
   private themeMode: ThemeMode;
   private scrollback: number;
   private locked = false;
+  private mcpShared = false;
+  /** Wait for a paint after input; inputAnchor separately guards pending edits. */
+  private mcpInputPending = false;
   private pathShell: PathShell = "posix";
   /** Command history capture + completion popup. Opt-in via the Edit menu. */
   private suggestionsOn = false;
@@ -548,7 +551,8 @@ export class TerminalController {
     // A file transfer owns the byte stream while it is active. Forwarding
     // keystrokes or paste data in the middle of a binary frame corrupts it.
     this.term.onData((data) => {
-      if (this.isTransferActive()) return;
+      if (this.mcpShared || this.isTransferActive()) return;
+      if (!TERMINAL_REPORT.test(data)) this.mcpInputPending = true;
       this.trackInput(data);
       this.callbacks.onData(data);
     });
@@ -625,6 +629,7 @@ export class TerminalController {
       if (buffer.type === "alternate") this.disposeAllSemanticColors();
     });
     this.term.onWriteParsed(() => {
+      this.mcpInputPending = false;
       // New output: xterm has updated the buffer and queued its repaint but
       // not painted yet, so decorations registered here land in that same
       // frame. Coloring only from `onRender` (which fires *after* the
@@ -1062,12 +1067,87 @@ export class TerminalController {
     this.term.write(text);
   }
 
+  /** A normal share never overrides an active command or an input anchor. */
+  canShareWithMcp(): boolean {
+    if (this.disposed || this.locked || this.mcpShared || this.mcpInputPending
+      || this.aiSession || this.isTransferActive()
+      || this.term.buffer.active.type !== "normal") return false;
+    return !this.commandRunning && !this.inputAnchor;
+  }
+
+  /** Offer manual recovery for GateShell's stale foreground-command tracking. */
+  canConfirmMcpShellReady(): boolean {
+    return !this.disposed && !this.locked && !this.mcpShared && !this.mcpInputPending
+      && !this.aiSession && !this.isTransferActive()
+      // Menu keys can leave an anchor on the *previous* screen/line. Only
+      // an anchor on this logical input line represents an unfinished edit.
+      && (!this.inputAnchor || !this.anchorOnCursorLine(this.inputAnchor))
+      && (this.commandRunning || this.inputAnchor !== null)
+      && this.term.buffer.active.type === "normal" && this.hasEmptyShellPrompt();
+  }
+
+  /** Recover stale menu tracking after an explicit MCP selection request. */
+  confirmMcpShellReady(): boolean {
+    if (!this.canConfirmMcpShellReady()) return false;
+    // Cancel the old heuristic tracking, not the remote process. In particular
+    // Sender waiters must not receive a false successful completion.
+    this.dropAnchor();
+    this.cancelCommandSent();
+    return true;
+  }
+
+  /** Explain the actual guard instead of reporting every rejection as busy. */
+  mcpSharingBlocker(): string {
+    if (this.pathShell !== "posix") return "MCP commands require a POSIX shell (sh, bash or zsh). This terminal uses PowerShell or cmd.";
+    if (this.disposed || this.locked) return "This terminal is closed. Reconnect it before sharing.";
+    if (this.mcpShared) return "This terminal is already shared with MCP.";
+    if (this.isTransferActive()) return "Finish or cancel the terminal file transfer before sharing.";
+    if (this.term.buffer.active.type !== "normal") return "Exit the full-screen program and return to the target shell prompt before sharing.";
+    if (this.aiSession) return "Exit the AI command-line program and return to the shell before sharing.";
+    if (this.mcpInputPending) return "Waiting for the terminal to respond to your last input. Return to an empty shell prompt before sharing.";
+    if (this.inputAnchor && this.anchorOnCursorLine(this.inputAnchor))
+      return "The current input line still has an editing marker. Cancel sharing, press Ctrl+C at the shell prompt to clear the line, then share again.";
+    if (!this.hasEmptyShellPrompt()) return "Kanso cannot recognize an empty shell prompt at the cursor. Return to the target shell prompt with no text after it.";
+    return "Kanso still has activity from the previous menu or command. Confirm the target shell is ready before sharing.";
+  }
+
+  private hasEmptyShellPrompt(): boolean {
+    const current = this.cursorLine();
+    if (!current) return false;
+    const end = shellPromptEnd(`${current.text} `);
+    if (end < 0 || current.text.slice(end).trim()) return false;
+    const buffer = this.term.buffer.active;
+    let row = buffer.baseY + buffer.cursorY;
+    let rest = buffer.getLine(row)?.translateToString(true, buffer.cursorX) ?? "";
+    // A Home/Left key can put the cursor at the prompt while a command still
+    // exists to its right, possibly continuing onto soft-wrapped rows.
+    while (buffer.getLine(row + 1)?.isWrapped) {
+      row += 1;
+      rest += buffer.getLine(row)?.translateToString(true) ?? "";
+    }
+    return !rest.trim();
+  }
+
+  setMcpShared(shared: boolean) {
+    this.mcpShared = shared;
+    this.term.options.disableStdin = this.locked || shared;
+    if (shared) this.hidePopup();
+  }
+
+  /** Global MCP grants permission; selection still requires a ready POSIX shell. */
+  prepareMcpSelection(): boolean {
+    if (this.pathShell !== "posix" || !this.hasEmptyShellPrompt()) return false;
+    if (this.canShareWithMcp()) return true;
+    return this.confirmMcpShellReady();
+  }
+
   /**
    * Records a command sent outside xterm's keyboard path (the Sender panel).
    * Call immediately before writing it so the current prompt can be used as
    * the completion signature.
    */
   noteCommandSent(command?: string) {
+    if (this.mcpShared) return false;
     // Text sent into an agentic CLI already holding the terminal is a turn
     // for it, not a command line the shell will answer with a prompt.
     if (this.aiSession) {
@@ -1120,9 +1200,10 @@ export class TerminalController {
   setLocked(locked: boolean) {
     if (this.locked === locked) return;
     this.locked = locked;
-    this.term.options.disableStdin = locked;
+    this.term.options.disableStdin = locked || this.mcpShared;
     this.term.write(locked ? "\x1b[?25l" : "\x1b[?25h");
     if (locked) {
+      this.mcpInputPending = false;
       this.hidePopup();
       this.resetCommandTracking();
       // A reconnected shell starts over in its home directory; the old
@@ -1558,6 +1639,7 @@ export class TerminalController {
     if (
       this.disposed ||
       this.locked ||
+      this.mcpShared ||
       this.commandRunning ||
       this.isTransferActive() ||
       this.term.buffer.active.type !== "normal"

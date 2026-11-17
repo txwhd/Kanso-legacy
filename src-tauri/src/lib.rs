@@ -6,6 +6,8 @@ mod fs_local;
 mod git;
 mod kube;
 mod local_shells;
+mod mcp;
+mod mcp_stdio;
 mod model;
 mod remote_edit;
 mod session;
@@ -234,6 +236,14 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "--mcp") {
+        if let Err(error) = mcp_stdio::run(&args[1..]) {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     // In portable mode the WebView2 profile must travel with the data
     // directory as well — localStorage holds the frontend preferences.  The
     // WebView2 loader reads this variable and it takes precedence over the
@@ -256,6 +266,7 @@ pub fn run() {
             // 启用时要一起恢复：这里的注册、tauri.conf.json 的 `plugins.updater`
             // 与 `createUpdaterArtifacts`，且更新源必须是 https。
             create_main_window(app)?;
+            mcp::McpState::start(app.handle());
             #[cfg(target_os = "macos")]
             install_menu(app)?;
             // Off the startup path; no watch of this run exists yet, and no
@@ -267,6 +278,7 @@ pub fn run() {
             Ok(())
         })
         .manage(AppState {
+            mcp: Default::default(),
             sessions: Default::default(),
             store: store::Store::load(),
             remote_edits: Default::default(),
@@ -292,6 +304,12 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            mcp::mcp_ui_state,
+            mcp::mcp_executable_path,
+            mcp::mcp_set_enabled,
+            mcp::mcp_release_session,
+            mcp::mcp_finish_selection,
+            mcp::mcp_sync_labels,
             commands::list_profiles,
             commands::save_profile,
             commands::delete_profile,
@@ -376,6 +394,7 @@ pub fn run() {
             // ⌘Q and the updater's relaunch never close the window.
             tauri::RunEvent::ExitRequested { .. } => app.state::<WindowMemory>().flush(),
             tauri::RunEvent::Exit => {
+                app.state::<AppState>().mcp.shutdown();
                 // Copies of remote files opened in local editors have no one
                 // to sync them once the app is gone.
                 app.state::<AppState>().remote_edits.stop_all(app);

@@ -4,6 +4,7 @@ import { toggleFilerForSession } from "../actions";
 import { useActiveTab, useStore } from "../store";
 import { isFileSession, type LegacyAlgorithms } from "../types";
 import { Icon } from "./icons";
+import { McpStatusControl } from "./McpControls";
 
 /** The tooltip naming each server's legacy algorithms, one server a line. */
 const legacyTitle = (servers: LegacyAlgorithms[]): string =>
@@ -81,6 +82,7 @@ export function StatusBar() {
         </>
       )}
       <div className="status-spacer" />
+      <McpStatusControl />
       {error && <span className="status-item is-error">{error}</span>}
       {legacy.length > 0 && (
         <span className="status-item status-legacy" title={legacyTitle(legacy)}>

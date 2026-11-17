@@ -88,3 +88,11 @@ jobs:
       # offline and deterministic.
       - name: Test the Rust side
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Build the native MCP entry
+        run: cargo build --locked --manifest-path src-tauri/Cargo.toml --bin kanso
+
+      - name: Test the native MCP stdio server
+        env:
+          KANSO_MCP_EXECUTABLE: ${{ github.workspace }}/src-tauri/target/debug/kanso${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: npm run test:mcp

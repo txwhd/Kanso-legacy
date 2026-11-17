@@ -134,8 +134,7 @@ export const listCommandHistory = () =>
 export const recordCommand = (command: string, host: string) =>
   invoke<void>("record_command", { command, host });
 
-export const clearCommandHistory = () =>
-  invoke<void>("clear_command_history");
+export const clearCommandHistory = () => invoke<void>("clear_command_history");
 
 // --- sessions ---------------------------------------------------------------
 
@@ -167,7 +166,8 @@ export const acceptHostKey = (change: HostKeyChange) =>
 export const answerAuthPrompt = (id: string, responses: string[] | null) =>
   invoke<void>("answer_auth_prompt", { id, responses });
 
-export const closeSession = (id: string) => invoke<void>("close_session", { id });
+export const closeSession = (id: string) =>
+  invoke<void>("close_session", { id });
 
 export const listSessions = () => invoke<SessionInfo[]>("list_sessions");
 
@@ -192,6 +192,61 @@ export const writeSessionBinary = (id: string, base64: string) =>
 export const resizeSession = (id: string, cols: number, rows: number) =>
   invoke<void>("resize_session", { id, cols, rows });
 
+// --- shared terminal MCP ----------------------------------------------------
+
+export interface McpExecution {
+  id: string;
+  sessionId: string;
+  command: string;
+  state: "running" | "completed" | "interrupted" | "disconnected";
+  started: boolean;
+  output: string;
+  truncated: boolean;
+  exitCode: number | null;
+  message: string | null;
+  elapsedMs: number;
+}
+
+export interface McpSharedSession {
+  id: string;
+  label: string;
+  connectionName: string;
+  connectionAddress: string;
+  kind: string;
+  selected: boolean;
+  selecting: boolean;
+  execution: Omit<McpExecution, "output"> | null;
+}
+
+export interface McpUiState {
+  enabled: boolean;
+  revision: number;
+  selections: McpSelection[];
+  bridgeFile: string | null;
+  error: string | null;
+  sessions: McpSharedSession[];
+}
+
+export interface McpSelection {
+  id: string;
+  sessionId: string;
+  state: "selecting" | "selected" | "failed";
+  message: string | null;
+}
+
+export const mcpUiState = () => invoke<McpUiState>("mcp_ui_state");
+export const mcpExecutablePath = () => invoke<string | null>("mcp_executable_path");
+export const mcpSetEnabled = (enabled: boolean) =>
+  invoke<void>("mcp_set_enabled", { enabled });
+export const mcpReleaseSession = (id: string) =>
+  invoke<void>("mcp_release_session", { id });
+export const mcpFinishSelection = (id: string, error: string | null) =>
+  invoke<McpSelection>("mcp_finish_selection", { id, error });
+export const mcpSyncLabels = (labels: { id: string; name: string }[]) =>
+  invoke<void>("mcp_sync_labels", { labels });
+export const onMcpChanged = (handler: () => void): Promise<UnlistenFn> =>
+  listen("mcp:changed", handler);
+
 // --- local file streaming for ZMODEM / XMODEM -------------------------------
 // Bounded chunks so a transfer never holds a whole file in the WebView; used
 // through terminalTransfer.ts by both protocols.
@@ -199,11 +254,8 @@ export const resizeSession = (id: string, cols: number, rows: number) =>
 export const zmodemFileInfo = (path: string) =>
   invoke<ZmodemFileInfo>("zmodem_file_info", { path });
 
-export const zmodemReadChunk = (
-  path: string,
-  offset: number,
-  length: number,
-) => invoke<string>("zmodem_read_chunk", { path, offset, length });
+export const zmodemReadChunk = (path: string, offset: number, length: number) =>
+  invoke<string>("zmodem_read_chunk", { path, offset, length });
 
 export const zmodemCreateFile = (path: string) =>
   invoke<void>("zmodem_create_file", { path });
@@ -344,8 +396,7 @@ export const localHome = () => invoke<string>("local_home");
  * Where a shell or SSH session's foreground job is right now: the OS is
  * asked for a local shell, the server for an SSH one (see `session/cwd.rs`).
  */
-export const sessionCwd = (id: string) =>
-  invoke<string>("session_cwd", { id });
+export const sessionCwd = (id: string) => invoke<string>("session_cwd", { id });
 
 /**
  * The branch the repository holding `path` is on, for the line under a local
@@ -657,6 +708,7 @@ export function base64ToBytes(base64: string): Uint8Array {
 
 export function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  for (let i = 0; i < bytes.length; i++)
+    binary += String.fromCharCode(bytes[i]);
   return btoa(binary);
 }

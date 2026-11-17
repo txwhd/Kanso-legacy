@@ -11,6 +11,7 @@ import {
 
 import { duplicateSession } from "../actions";
 import { IS_MAC } from "../platform";
+import { useMcp } from "../mcp";
 import { tabTitle, useStore, type Tab } from "../store";
 import {
   colorForSession,
@@ -125,6 +126,7 @@ function rowMeta(tab: Tab): string | null {
 
 /** 左侧展示已打开终端，并提供会话浮层入口；新建与编辑由应用对话框负责。 */
 export function TabRail({ onNewSession, onConfigureLocalShell, onEditProfile }: Props) {
+  const mcpSessions = useMcp((state) => state.sessions);
   const allTabs = useStore((s) => s.tabs);
   const panes = useStore((s) => s.panes);
   const profiles = useStore((s) => s.profiles);
@@ -448,6 +450,7 @@ export function TabRail({ onNewSession, onConfigureLocalShell, onEditProfile }: 
                 )}
                 {block.tabs.map((tab, tabIndex) => {
                 const active = tab.info.id === activeId;
+                const mcpSelected = mcpSessions.some((session) => session.id === tab.info.id && (session.selected || session.selecting));
                 const shiftsUp =
                   dragView?.paneId === block.pane.id &&
                   dragView.fromIndex < dragView.dropIndex &&
@@ -494,6 +497,7 @@ export function TabRail({ onNewSession, onConfigureLocalShell, onEditProfile }: 
                       // 图标负责识别工具，这里补充文字名称以便悬停核对。
                       tab.aiTool?.label,
                       tab.branch,
+                      mcpSelected ? "Selected by MCP · input locked" : null,
                       tab.commandActivity === "running"
                         ? activityLabel(tab)
                         : tab.commandActivity === "complete"
@@ -517,6 +521,7 @@ export function TabRail({ onNewSession, onConfigureLocalShell, onEditProfile }: 
                     <div className="tab-row-text">
                       <div className="tab-row-title">
                         <span className="tab-label">{rowTitle(tab)}</span>
+                        {mcpSelected && <span className="mcp-tab-badge" title="Selected by MCP · input locked">MCP</span>}
                         <span className="tab-row-actions">
                           <span className="tab-shortcut">
                             {tab.number <= 9

@@ -12,7 +12,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use encoding_rs::Encoding;
 use parking_lot::Mutex;
 use serde::Serialize;
-use tauri::{ipc::Channel, AppHandle, Emitter};
+use tauri::{ipc::Channel, AppHandle, Emitter, Manager};
 use tokio::sync::{mpsc, oneshot};
 
 use self::transfer::CancelFlag;
@@ -144,6 +144,22 @@ impl SessionManager {
             .collect()
     }
 
+    pub fn is_live(&self, id: &str) -> bool {
+        self.sessions
+            .lock()
+            .get(id)
+            .is_some_and(|handle| !handle.tx.is_closed())
+    }
+
+    pub fn live_encoding(&self, id: &str) -> Result<&'static Encoding> {
+        let guard = self.sessions.lock();
+        let handle = Self::handle(&guard, id)?;
+        if handle.tx.is_closed() {
+            return Err(AppError::new("session has terminated"));
+        }
+        Ok(handle.encoding)
+    }
+
     /** 返回会话已认证的 SSH transport；Local Shell 或已移除会话返回 None。 */
     pub fn ssh_transport(&self, id: &str) -> Option<ssh::SharedSshTransport> {
         self.sessions
@@ -185,12 +201,22 @@ impl SessionManager {
     /// actually written it. Unlike the ordinary keyboard-input path, this
     /// applies backpressure so a large protocol transfer cannot accumulate in
     /// the unbounded command channel.
-    pub async fn write_confirmed(&self, id: &str, data: Vec<u8>) -> Result<()> {
+    pub fn write_confirmed(
+        &self,
+        id: &str,
+        data: Vec<u8>,
+    ) -> impl std::future::Future<Output = Result<()>> + Send + 'static {
         let (reply, response) = oneshot::channel();
-        self.send(id, SessionCommand::WriteConfirmed { data, reply })?;
-        response
-            .await
-            .map_err(|_| AppError::new(format!("session {id} closed before writing binary data")))?
+        // Queue synchronously so ownership checks can guard the write without
+        // holding a mutex while waiting for the transport acknowledgment.
+        let sent = self.send(id, SessionCommand::WriteConfirmed { data, reply });
+        let id = id.to_owned();
+        async move {
+            sent?;
+            response.await.map_err(|_| {
+                AppError::new(format!("session {id} closed before writing binary data"))
+            })?
+        }
     }
 
     /// Round-trips an SFTP request through the owning session task.
@@ -233,11 +259,21 @@ pub fn emit_output(app: &AppHandle, id: &str, bytes: &[u8]) {
     if bytes.is_empty() {
         return;
     }
+    let (bytes, completed) = app
+        .try_state::<crate::commands::AppState>()
+        .map(|state| state.mcp.output(id, bytes))
+        .unwrap_or_else(|| (bytes.to_vec(), false));
+    if completed {
+        crate::mcp::changed(app);
+    }
+    if bytes.is_empty() {
+        return;
+    }
     let _ = app.emit(
         EVENT_OUTPUT,
         OutputEvent {
             id: id.to_string(),
-            data: B64.encode(bytes),
+            data: B64.encode(&bytes),
         },
     );
 }
@@ -249,6 +285,17 @@ pub fn emit_output(app: &AppHandle, id: &str, bytes: &[u8]) {
 /// same session id right away, so a late "closed" from the old session would
 /// otherwise be taken for the new one going down.
 pub fn emit_state(app: &AppHandle, id: &str, state: &str, message: Option<String>) {
+    if state == "closed" || state == "error" {
+        if let Some(app_state) = app.try_state::<crate::commands::AppState>() {
+            let visible = app_state.mcp.revoke(
+                id,
+                "disconnected",
+                "Terminal disconnected. Log in and share it again in Kanso.",
+            );
+            emit_output(app, id, &visible);
+            crate::mcp::changed(app);
+        }
+    }
     let _ = app.emit(
         EVENT_STATE,
         StateEvent {

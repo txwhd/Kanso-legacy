@@ -28,6 +28,7 @@ use crate::ssh_config::{self, SshConfigPreview, SshImportSummary};
 use crate::store::{self, Store};
 
 pub struct AppState {
+    pub mcp: crate::mcp::McpState,
     pub sessions: SessionManager,
     pub store: Store,
     pub remote_edits: RemoteEdits,
@@ -235,6 +236,13 @@ pub async fn open_session(
     // 复制 SSH 标签时指定来源会话；普通新建和重连传 None。
     transport_session_id: Option<String>,
 ) -> Result<OpenSessionOutcome> {
+    // Permission belongs to this terminal instance, never to its saved profile.
+    state.mcp.revoke(
+        &session_id,
+        "disconnected",
+        "Session reconnected; share the new terminal explicitly.",
+    );
+    crate::mcp::changed(&app);
     // A profile may arrive by id (from the tree) or inline (quick connect).
     // 复制必须沿用来源标签实际连接时的配置；若保存项此后被编辑，不能把旧
     // transport 标成新地址。只有普通新建才重新读取保存项。
@@ -353,10 +361,12 @@ pub fn answer_auth_prompt(
 }
 
 #[tauri::command]
-pub fn close_session(state: State<'_, AppState>, id: String) -> Result<()> {
+pub fn close_session(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<()> {
     if let Some(handle) = state.sessions.remove(&id) {
         let _ = handle.tx.send(SessionCommand::Close);
     }
+    state.mcp.revoke(&id, "disconnected", "Terminal closed.");
+    crate::mcp::changed(&app);
     Ok(())
 }
 
@@ -378,7 +388,9 @@ pub async fn list_system_fonts() -> Vec<FontFamily> {
 /// goes out in the session's own encoding.
 #[tauri::command]
 pub fn write_session(state: State<'_, AppState>, id: String, data: String) -> Result<()> {
-    state.sessions.write_text(&id, &data)
+    state
+        .mcp
+        .manual_input(&id, || state.sessions.write_text(&id, &data))
 }
 
 /// Raw bytes, base64-encoded, for ZMODEM's protocol frames; waits until
@@ -390,7 +402,10 @@ pub async fn write_session_binary(
     data: String,
 ) -> Result<()> {
     let bytes = B64.decode(data).map_err(err)?;
-    state.sessions.write_confirmed(&id, bytes).await
+    let write = state
+        .mcp
+        .manual_input(&id, || Ok(state.sessions.write_confirmed(&id, bytes)))?;
+    write.await
 }
 
 #[tauri::command]

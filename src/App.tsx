@@ -36,6 +36,7 @@ import { SshConfigImportDialog } from "./components/SshConfigImportDialog";
 import { Splitter } from "./components/Splitter";
 import { StatusBar } from "./components/StatusBar";
 import { SenderPauseNotice } from "./components/SenderPauseNotice";
+import { McpNotice } from "./components/McpControls";
 import { TabRail } from "./components/TabRail";
 import { UpdateDialog } from "./components/UpdateDialog";
 import { Workspace } from "./components/Workspace";
@@ -44,6 +45,7 @@ import { GitChangesPanel } from "./components/panels/GitChangesPanel";
 import { SenderPanel } from "./components/panels/SenderPanel";
 import { applyFonts, symbolFallbacks } from "./fonts";
 import { commandHistory } from "./history";
+import { watchMcp } from "./mcp";
 import { setSemanticColorTheme } from "./semanticColors";
 import { matchAppShortcut } from "./shortcuts";
 import { useActiveTab, useStore } from "./store";
@@ -70,6 +72,7 @@ const hasLiveSessions = () =>
     .tabs.some((tab) => tab.state === "connecting" || tab.state === "connected");
 
 export default function App() {
+  useEffect(watchMcp, []);
   const updater = useUpdater();
   const activeId = useStore((s) => s.activeId);
   const panels = useStore((s) => s.panels);
@@ -537,6 +540,7 @@ export default function App() {
           )}
 
           <SenderPauseNotice />
+          <McpNotice />
           <StatusBar />
         </div>
       </div>

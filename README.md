@@ -111,6 +111,18 @@ A right click in the terminal opens a context menu — Copy, Paste, Select All, 
 
 Every shortcut above can be rebound in **View → Keyboard Shortcuts…** — click a command's keys and press the combination you want, or clear it to leave the command unassigned — except the tab-number keys. Copy, paste and select all are in the table too, so `Ctrl+Insert` / `Shift+Insert` or plain `Ctrl+C` / `Ctrl+V` work for those used to them; a copy key that is plain `Ctrl+letter` still reaches the shell while nothing is selected, so `Ctrl+C` keeps interrupting. **Help → Restore Default Settings…** puts the whole table back.
 
+## Shared terminal MCP (v1)
+
+Click **Enable MCP** once to expose all connected terminal tabs under their
+existing names. Hover **MCP On** to copy native stdio configurations for Codex
+or DeepSeek Harness; no Node.js installation is required. The client lists terminals and calls `kanso_select_session`;
+only selected terminals lock keyboard, paste and Sender input. Multiple
+terminals can be selected independently. Execute non-interactive POSIX commands
+and query output/exit codes without another login. **Release / Take Control**
+releases one terminal; turning the separate MCP switch off releases all. No dedicated file
+tools are provided. See the [MCP guide](docs/mcp.md) for client
+configuration, supported shells, and recovery.
+
 ## Releases
 
 | Platform | Package |

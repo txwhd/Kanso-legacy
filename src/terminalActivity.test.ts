@@ -80,6 +80,158 @@ describe("shell prompt recognition", () => {
 });
 
 describe("terminal command activity", () => {
+  it("selects a ready POSIX prompt, but rejects unsupported shells and pending edits", async () => {
+    const controller = createController([]);
+    await write(controller, "alice@server:~$ ");
+    controller.setPathShell("powershell");
+    expect(controller.prepareMcpSelection()).toBe(false);
+    controller.setPathShell("posix");
+    expect(controller.prepareMcpSelection()).toBe(true);
+    controller.term.input("x", true);
+    expect(controller.prepareMcpSelection()).toBe(false);
+    await write(controller, "x");
+    expect(controller.prepareMcpSelection()).toBe(false);
+  });
+
+  it.each(["\x1b[B", "q"])(
+    "recovers a GateShell menu input anchor left on an earlier line (%j)",
+    async (key) => {
+      const states: string[] = [];
+      const controller = createController(states);
+      await write(controller, "Asset number: ");
+      controller.term.input("001", true);
+      await write(controller, "001");
+      controller.term.input("\r", true);
+      await write(controller, "\r\nGateShell menu: ");
+      controller.term.input(key, true);
+      await write(controller, "\r\nConnecting...\r\n[root@node1 ~]# ");
+      expect(controller.canShareWithMcp()).toBe(false);
+      expect(controller.canConfirmMcpShellReady()).toBe(true);
+      const waiter = controller.waitForCommand(1000);
+      expect(controller.prepareMcpSelection()).toBe(true);
+      expect(controller.canShareWithMcp()).toBe(true);
+      expect(await waiter).toBe("closed");
+      expect(states).toEqual(["running", "idle"]);
+    },
+  );
+
+  it("offers recovery for an old menu anchor even when no command was tracked", async () => {
+    const controller = createController([]);
+    await write(controller, "GateShell assets\r\nSelect target: ");
+    controller.term.input("\x1b[B", true);
+    await write(controller, "\r\nWelcome to target\r\n[root@node1 ~]# ");
+    expect(controller.canShareWithMcp()).toBe(false);
+    expect(controller.canConfirmMcpShellReady()).toBe(true);
+    expect(controller.confirmMcpShellReady()).toBe(true);
+    expect(controller.canShareWithMcp()).toBe(true);
+  });
+
+  it("requires explicit recovery after GateShell reaches a target prompt without completing Sender waiters", async () => {
+    const states: string[] = [];
+    const controller = createController(states);
+    await write(controller, "GateShell assets\r\nAsset number: ");
+    controller.term.input("001", true);
+    await write(controller, "001");
+    controller.term.input("\r", true);
+    await write(controller, "\r\nConnecting to target...\r\nPassword: ");
+    expect(controller.canShareWithMcp()).toBe(false);
+    await write(controller, "\r\nWelcome to node1\r\n[root@node1 ~]# ");
+    // The old GateShell prompt is not a shell signature. Do not loosen the
+    // automatic completion rules just to allow the user's explicit sharing.
+    expect(states).toEqual(["running"]);
+    expect(controller.canShareWithMcp()).toBe(false);
+    expect(controller.canConfirmMcpShellReady()).toBe(true);
+    controller.term.input("kubectl get pod", true);
+    expect(controller.canShareWithMcp()).toBe(false);
+    expect(controller.canConfirmMcpShellReady()).toBe(false);
+    await write(controller, "kubectl get pod");
+    controller.term.input("\r", true);
+    await write(
+      controller,
+      "\r\nNo resources found in default namespace.\r\n[root@node1 ~]# ",
+    );
+    expect(controller.canShareWithMcp()).toBe(false);
+    expect(controller.canConfirmMcpShellReady()).toBe(true);
+    const waiter = controller.waitForCommand(1000);
+    expect(controller.confirmMcpShellReady()).toBe(true);
+    expect(controller.canShareWithMcp()).toBe(true);
+    controller.setMcpShared(true);
+    expect(await waiter).toBe("closed");
+    expect(states).toEqual(["running", "idle"]);
+    expect(controller.term.options.disableStdin).toBe(true);
+  });
+
+  it("blocks unacknowledged input even when unrelated output is parsed", async () => {
+    const controller = createController([]);
+    await write(controller, "[root@node1 ~]# ");
+    controller.term.input("x", true);
+    expect(controller.canShareWithMcp()).toBe(false);
+    await write(controller, "\x1b[0m");
+    expect(controller.canShareWithMcp()).toBe(false);
+    expect(controller.canConfirmMcpShellReady()).toBe(false);
+    await write(controller, "x");
+    expect(controller.canShareWithMcp()).toBe(false);
+    controller.term.input("\x7f", true);
+    expect(controller.canShareWithMcp()).toBe(false);
+    await write(controller, "\b \b");
+    // A clear-looking line alone does not acknowledge input. Ctrl+C explicitly
+    // abandons the unfinished edit without pretending a command completed.
+    expect(controller.canShareWithMcp()).toBe(false);
+    controller.term.input("\x03", true);
+    await write(controller, "^C\r\n[root@node1 ~]# ");
+    expect(controller.canShareWithMcp()).toBe(true);
+  });
+
+  it("does not share a command hidden to the right of the cursor or on a wrapped row", async () => {
+    const controller = createController([]);
+    controller.term.resize(40, 10);
+    await write(controller, "[root@node1 ~]# ");
+    const command = "echo " + "x".repeat(50);
+    controller.term.input(command, true);
+    await write(controller, command);
+    // Move to the prompt boundary while leaving the unsubmitted command in
+    // the buffer, including the continuation of its soft-wrapped line.
+    await write(controller, "\x1b[1;16H");
+    expect(controller.canShareWithMcp()).toBe(false);
+    expect(controller.canConfirmMcpShellReady()).toBe(false);
+  });
+
+  it("does not automatically share a running program that prints a prompt-like line", async () => {
+    const controller = createController([]);
+    await write(controller, "Asset number: ");
+    controller.term.input("001", true);
+    await write(controller, "001");
+    controller.term.input("\r", true);
+    await write(
+      controller,
+      "\r\nA foreground program prints an example prompt:\r\n[root@node1 ~]# ",
+    );
+    expect(controller.canShareWithMcp()).toBe(false);
+    expect(await controller.waitForCommand(1)).toBe("timeout");
+  });
+
+  it("shares only idle terminals and restores input without unlocking a closed session", async () => {
+    const controller = createController([]);
+    await write(controller, "alice@server:~$ ");
+    expect(controller.canShareWithMcp()).toBe(true);
+    controller.term.input("x", true);
+    expect(controller.canShareWithMcp()).toBe(false);
+    controller.term.input("\x03", true);
+    await write(controller, "^C\r\nalice@server:~$ ");
+    expect(controller.canShareWithMcp()).toBe(true);
+    controller.setMcpShared(true);
+    expect(controller.term.options.disableStdin).toBe(true);
+    expect(controller.noteCommandSent("pwd")).toBe(false);
+    controller.setLocked(true);
+    controller.setMcpShared(false);
+    expect(controller.term.options.disableStdin).toBe(true);
+    expect(controller.canShareWithMcp()).toBe(false);
+    controller.setLocked(false);
+    expect(controller.term.options.disableStdin).toBe(false);
+    controller.noteCommandSent("sleep 60");
+    expect(controller.canShareWithMcp()).toBe(false);
+  });
+
   it("distinguishes a timeout, returned prompt, cancellation and session close", async () => {
     const controller = createController([]);
     const prompt = "alice@server:~/work$ ";
@@ -168,10 +320,7 @@ describe("terminal command activity", () => {
     controller.term.input("cd ../new", true);
     await write(controller, "cd ../new");
     controller.term.input("\r", true);
-    await write(
-      controller,
-      "\r\n\x1b]7;file://localhost/new\x07",
-    );
+    await write(controller, "\r\n\x1b]7;file://localhost/new\x07");
 
     expect(states).toEqual(["running", "complete"]);
   });
