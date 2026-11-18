@@ -1,4 +1,3 @@
-import type { PhysicalPosition } from "@tauri-apps/api/dpi";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
@@ -12,6 +11,7 @@ import {
 
 import { revealCwdInFiler } from "../../actions";
 import * as api from "../../api";
+import { dropPoint } from "../../fileDrop";
 import { IS_MAC, IS_WINDOWS } from "../../platform";
 import { chordLabel } from "../../shortcuts";
 import { tabTitle, useActiveTab, useStore } from "../../store";
@@ -87,21 +87,6 @@ interface DropVerdict {
   accept: boolean;
   reason: string | null;
 }
-
-/**
- * Where a drag currently is, in CSS pixels, so it can be compared with the
- * panel's own `getBoundingClientRect()`.
- *
- * Tauri types the position as physical, but only Windows measures it that
- * way: wry reads the client point from `ScreenToClient`. macOS passes
- * AppKit's `draggingLocation` and Linux the widget coordinates of GTK's
- * `drag-motion` straight through, and both of those are already logical
- * points. Dividing them by the device pixel ratio put every drop at half its
- * real position, which on a Retina display is far to the left of the Filer —
- * the panel never saw a drop and nothing was ever uploaded.
- */
-const dropPoint = (position: PhysicalPosition): { x: number; y: number } =>
-  IS_WINDOWS ? position.toLogical(window.devicePixelRatio) : position;
 
 /** 跟随当前终端浏览本地或远程文件；独立文件会话由双栏工作区承载。 */
 export function FilerPanel() {

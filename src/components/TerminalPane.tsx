@@ -11,8 +11,9 @@ import {
 } from "react";
 
 import { ensureController } from "../actions";
+import { dropPoint } from "../fileDrop";
 import { fontStack } from "../fonts";
-import { IS_MAC, IS_WINDOWS } from "../platform";
+import { IS_MAC } from "../platform";
 import { chordLabel, type ShortcutCommand } from "../shortcuts";
 import { useStore, type Tab } from "../store";
 import type { TerminalController } from "../terminal";
@@ -297,10 +298,7 @@ function TerminalHost({
     let live = true;
     const unlisten = getCurrentWebview().onDragDropEvent(({ payload }) => {
       if (!live || payload.type !== "drop" || payload.paths.length === 0) return;
-      // 与 Filer 一致：macOS/Linux 已是逻辑坐标，仅 Windows 需要缩放。
-      const position = IS_WINDOWS
-        ? payload.position.toLogical(window.devicePixelRatio)
-        : payload.position;
+      const position = dropPoint(payload.position);
       const target = document.elementFromPoint(position.x, position.y);
       if (!target || !ref.current?.contains(target)) return;
       const store = useStore.getState();
