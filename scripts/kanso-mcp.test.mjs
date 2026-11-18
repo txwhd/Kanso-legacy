@@ -77,7 +77,7 @@ async function fixture(handler) {
   };
 }
 
-test("stdio MCP handshake discovers the five terminal tools, without a running app", async () => {
+test("stdio MCP handshake discovers nine terminal tools, without a running app", async () => {
   const client = new Client({ name: "discovery-test", version: "1" });
   try {
     await client.connect(transport(join(tmpdir(), "missing-kanso-descriptor")));
@@ -85,9 +85,13 @@ test("stdio MCP handshake discovers the five terminal tools, without a running a
     assert.deepEqual(tools.map((tool) => tool.name).sort(), [
       "kanso_execute_command",
       "kanso_get_execution",
+      "kanso_get_session_status",
+      "kanso_interrupt_execution",
       "kanso_list_sessions",
+      "kanso_read_terminal",
       "kanso_release_session",
       "kanso_select_session",
+      "kanso_show_terminal",
     ]);
     const result = await client.callTool({
       name: "kanso_list_sessions",
@@ -328,7 +332,7 @@ test("stdio rejects invalid arguments before any bridge request", async () => {
   const f = await fixture(() => ({ result: {} }));
   try {
     const client = await f.client();
-    assert.equal((await client.listTools()).tools.length, 5);
+    assert.equal((await client.listTools()).tools.length, 9);
     for (const args of [
       { sessionId: "target", command: "pwd", waitMs: -1 },
       { sessionId: "target", command: "pwd", waitMs: 1.5 },
@@ -341,6 +345,154 @@ test("stdio rejects invalid arguments before any bridge request", async () => {
       assert.equal(result.isError, true);
     }
     assert.equal(f.requests.length, 0);
+  } finally {
+    await f.close();
+  }
+});
+
+test("inspection tools poll the frontend and preserve cursor/state/show results without selecting", async () => {
+  const completed = {
+    read_terminal: {
+      sessionId: "target",
+      output: "人工执行的输出",
+      nextCursor: "snapshot:12",
+      bufferType: "normal",
+    },
+    get_session_status: {
+      sessionId: "target",
+      connected: true,
+      selected: false,
+      readyToSelect: false,
+      selectionBlocker: "Finish typing first",
+    },
+    show_terminal: { sessionId: "target", state: "shown" },
+  };
+  let method;
+  const f = await fixture((request) => {
+    if (request.method === "frontend_request_status") {
+      assert.deepEqual(request.params, { requestId: "request" });
+      return {
+        result: {
+          id: "request",
+          state: "completed",
+          result: completed[method],
+        },
+      };
+    }
+    assert.ok(Object.hasOwn(completed, request.method));
+    method = request.method;
+    assert.equal(request.params.sessionId, "target");
+    if (method === "read_terminal")
+      assert.deepEqual(request.params, {
+        sessionId: "target",
+        maxLines: 12,
+        cursor: "snapshot:24",
+      });
+    return { result: { id: "request", state: "pending" } };
+  });
+  try {
+    const client = await f.client();
+    for (const operation of Object.keys(completed)) {
+      const result = await client.callTool({
+        name: `kanso_${operation}`,
+        arguments: {
+          sessionId: "target",
+          ...(operation === "read_terminal"
+            ? { maxLines: 12, cursor: "snapshot:24" }
+            : {}),
+        },
+      });
+      assert.deepEqual(result.structuredContent, completed[operation]);
+    }
+    assert.ok(
+      f.requests.every(
+        (request) => !["select_session", "execute"].includes(request.method),
+      ),
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("inspection failure remains an MCP tool error and invalid pagination never reaches the bridge", async () => {
+  const f = await fixture(() => ({
+    result: { state: "failed", message: "Terminal cursor expired" },
+  }));
+  try {
+    const client = await f.client();
+    const failed = await client.callTool({
+      name: "kanso_read_terminal",
+      arguments: { sessionId: "target" },
+    });
+    assert.equal(failed.isError, true);
+    assert.match(failed.content[0].text, /cursor expired/);
+    for (const maxLines of [0, 501, 2.5]) {
+      const invalid = await client
+        .callTool({
+          name: "kanso_read_terminal",
+          arguments: { sessionId: "target", maxLines },
+        })
+        .catch(() => ({ isError: true }));
+      assert.equal(invalid.isError, true);
+    }
+    assert.equal(f.requests.length, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test("interrupt uses an execution ID and reports a request without claiming completion", async () => {
+  const f = await fixture((request) => {
+    assert.equal(request.method, "interrupt_execution");
+    assert.deepEqual(request.params, { executionId: "exact-job" });
+    return {
+      result: {
+        state: "interrupt_requested",
+        executionId: "exact-job",
+        sessionId: "target",
+      },
+    };
+  });
+  try {
+    const client = await f.client();
+    const result = await client.callTool({
+      name: "kanso_interrupt_execution",
+      arguments: { executionId: "exact-job" },
+    });
+    assert.equal(result.structuredContent.state, "interrupt_requested");
+    assert.equal(result.isError, undefined);
+    assert.equal(f.requests.length, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test("permission blocks are structured MCP errors without polling or replay", async () => {
+  const blocked = {
+    code: "COMMAND_BLOCKED",
+    state: "blocked",
+    permission: "read_only",
+    rule: "write_operation",
+    message: "Command was not sent",
+  };
+  const f = await fixture((request) => {
+    assert.equal(request.method, "execute");
+    return { result: blocked };
+  });
+  try {
+    const client = await f.client();
+    const result = await client.callTool({
+      name: "kanso_execute_command",
+      arguments: { sessionId: "target", command: "touch /tmp/a", waitMs: 1000 },
+    });
+    assert.equal(result.isError, true);
+    assert.deepEqual(result.structuredContent, blocked);
+    assert.equal(f.requests.length, 1);
+    assert.ok(
+      !(await client.listTools()).tools.some((tool) =>
+        /permission/.test(tool.name),
+      ),
+    );
   } finally {
     await f.close();
   }

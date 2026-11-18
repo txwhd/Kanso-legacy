@@ -28,6 +28,11 @@ const OUTPUT_LIMIT: usize = 64 * 1024;
 const HISTORY_LIMIT: usize = 32;
 const REQUEST_LIMIT: u64 = 32 * 1024;
 
+pub(crate) mod frontend;
+mod policy;
+use frontend::{FrontendRequest, FrontendRequestView};
+use policy::{CommandBlocked, Permission};
+
 #[derive(Default)]
 pub struct McpState {
     inner: Mutex<Inner>,
@@ -38,12 +43,33 @@ pub struct McpState {
 #[derive(Default)]
 struct Inner {
     enabled: bool,
+    permission: Permission,
     revision: u64,
     labels: HashMap<String, String>,
     selections: HashMap<String, Selection>,
     shared: HashMap<String, SharedSession>,
     executions: HashMap<String, Execution>,
     order: VecDeque<String>,
+    frontend_requests: HashMap<String, FrontendRequest>,
+}
+
+#[derive(Debug)]
+enum ExecuteError {
+    App(AppError),
+    Blocked(CommandBlocked),
+}
+impl From<AppError> for ExecuteError {
+    fn from(error: AppError) -> Self {
+        Self::App(error)
+    }
+}
+impl std::fmt::Display for ExecuteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::App(error) => error.fmt(f),
+            Self::Blocked(blocked) => blocked.fmt(f),
+        }
+    }
 }
 
 struct Selection {
@@ -92,6 +118,7 @@ pub struct ExecutionView {
     exit_code: Option<i32>,
     message: Option<String>,
     elapsed_ms: u64,
+    interrupt_requested: bool,
 }
 
 /// Discovery/UI metadata stays small even when many terminals have full buffers.
@@ -107,6 +134,7 @@ struct ExecutionSummary {
     exit_code: Option<i32>,
     message: Option<String>,
     elapsed_ms: u64,
+    interrupt_requested: bool,
 }
 
 struct Execution {
@@ -119,6 +147,7 @@ struct Execution {
     message: Option<String>,
     created: Instant,
     finished_ms: Option<u64>,
+    interrupt_requested: bool,
 }
 
 impl Execution {
@@ -133,6 +162,7 @@ impl Execution {
             exit_code: self.capture.exit_code,
             message: self.message.clone(),
             elapsed_ms: self.finished_ms.unwrap_or_else(|| self.elapsed_ms()),
+            interrupt_requested: self.interrupt_requested,
         }
     }
 
@@ -148,6 +178,7 @@ impl Execution {
             exit_code: self.capture.exit_code,
             message: self.message.clone(),
             elapsed_ms: self.finished_ms.unwrap_or_else(|| self.elapsed_ms()),
+            interrupt_requested: self.interrupt_requested,
         }
     }
 
@@ -179,11 +210,13 @@ pub struct SharedSessionView {
 #[serde(rename_all = "camelCase")]
 pub struct UiState {
     enabled: bool,
+    permission: Permission,
     revision: u64,
     selections: Vec<SelectionView>,
     bridge_file: Option<String>,
     error: Option<String>,
     sessions: Vec<SharedSessionView>,
+    requests: Vec<FrontendRequestView>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -307,6 +340,7 @@ impl McpState {
         expire_selections(&mut inner);
         UiState {
             enabled: inner.enabled,
+            permission: inner.permission,
             revision: inner.revision,
             selections: inner
                 .selections
@@ -321,6 +355,12 @@ impl McpState {
                 .map(|bridge| bridge.path.to_string_lossy().into_owned()),
             error: self.startup_error.lock().clone(),
             sessions: list_sessions(&inner, sessions),
+            requests: inner
+                .frontend_requests
+                .values()
+                .filter(|request| request.state == "pending")
+                .map(FrontendRequest::view)
+                .collect(),
         }
     }
 
@@ -361,6 +401,7 @@ impl McpState {
         inner.revision += 1;
         let mut visible = Vec::new();
         if !enabled {
+            frontend::cancel_requests(&mut inner, None, "MCP was disabled");
             let ids: Vec<_> = inner.shared.keys().cloned().collect();
             for id in ids {
                 visible.push((
@@ -383,6 +424,12 @@ impl McpState {
             }
         }
         Ok(visible)
+    }
+
+    fn set_permission(&self, permission: Permission) {
+        let mut inner = self.inner.lock();
+        inner.permission = permission;
+        inner.revision += 1;
     }
 
     fn begin_selection(&self, sessions: &SessionManager, id: &str) -> Result<SelectionView> {
@@ -516,12 +563,17 @@ impl McpState {
         revoke_inner(&mut inner, id, state, message)
     }
 
-    fn execute(&self, sessions: &SessionManager, id: &str, command: &str) -> Result<ExecutionView> {
+    fn execute(
+        &self,
+        sessions: &SessionManager,
+        id: &str,
+        command: &str,
+    ) -> std::result::Result<ExecutionView, ExecuteError> {
         let execution_id = uuid::Uuid::new_v4().simple().to_string();
-        let script = command_script(&execution_id, command)?;
+        command_script(&execution_id, command)?;
         let mut inner = self.inner.lock();
         if !inner.enabled {
-            return Err(AppError::new("MCP is disabled. Enable MCP in Kanso first."));
+            return Err(AppError::new("MCP is disabled. Enable MCP in Kanso first.").into());
         }
         let shared = inner.shared.get(id).ok_or_else(|| {
             AppError::new("terminal is not selected; call kanso_select_session first")
@@ -534,20 +586,28 @@ impl McpState {
         {
             return Err(AppError::new(
                 "this session has a running execution; poll it or take control in Kanso",
-            ));
+            )
+            .into());
         }
+        // Permission changes and submissions share this lock. Validate every
+        // segment before creating history/capture or queuing even one byte.
+        let approved =
+            policy::authorize(inner.permission, command).map_err(ExecuteError::Blocked)?;
+        let script = command_script(&execution_id, &approved)?;
         let encoding = sessions.live_encoding(id)?;
         // Reject unmappable input rather than silently executing a changed command.
         let (encoded, _, unmappable) = encoding.encode(&script);
         if unmappable {
             return Err(AppError::new(
                 "command contains characters unsupported by this terminal's encoding",
-            ));
+            )
+            .into());
         }
         if encoded.len() > 3500 {
             return Err(AppError::new(
                 "encoded command exceeds the 3,500-byte terminal input limit",
-            ));
+            )
+            .into());
         }
         let mut capture = Capture::new(&execution_id);
         // The terminal still uses its configured byte encoding.
@@ -565,6 +625,7 @@ impl McpState {
             message: None,
             created: Instant::now(),
             finished_ms: None,
+            interrupt_requested: false,
         };
         // The capture is registered before the write; the lock also serializes submissions.
         inner.executions.insert(execution_id.clone(), job);
@@ -577,7 +638,7 @@ impl McpState {
                 .unwrap()
                 .finish("disconnected", Some(error.to_string()));
             inner.shared.remove(id);
-            return Err(error);
+            return Err(error.into());
         }
         prune(&mut inner);
         Ok(inner.executions[&execution_id].view())
@@ -586,6 +647,42 @@ impl McpState {
     fn execution(&self, id: &str) -> Result<ExecutionView> {
         self.inner.lock().executions.get(id).map(Execution::view)
             .ok_or_else(|| AppError::new("execution not found (results are kept only in this Kanso process, with bounded history)"))
+    }
+
+    fn interrupt(&self, sessions: &SessionManager, execution_id: &str) -> Result<Value> {
+        let mut inner = self.inner.lock();
+        if !inner.enabled {
+            return Err(AppError::new("MCP is disabled"));
+        }
+        let job = inner
+            .executions
+            .get(execution_id)
+            .ok_or_else(|| AppError::new("execution not found"))?;
+        let session_id = job.session_id.clone();
+        if job.state != "running"
+            || inner
+                .shared
+                .get(&session_id)
+                .and_then(|shared| shared.last_execution.as_deref())
+                != Some(execution_id)
+        {
+            return Err(AppError::new(
+                "execution is no longer the selected terminal's running command",
+            ));
+        }
+        sessions.live_encoding(&session_id)?;
+        if !job.interrupt_requested {
+            // Validate execution identity and enqueue the signal under the same
+            // lock as execute/release. Repeated requests never signal a new job.
+            sessions.write_text(&session_id, "\x03")?;
+            let job = inner.executions.get_mut(execution_id).unwrap();
+            job.interrupt_requested = true;
+            job.message = Some("Ctrl+C requested. Wait for an end marker; if the wrapper was interrupted too, inspect the terminal and release/reselect after the shell prompt returns.".into());
+            inner.revision += 1;
+        }
+        Ok(
+            json!({"sessionId":session_id,"executionId":execution_id,"state":"interrupt_requested","message":"Ctrl+C was queued once. Delivery and process exit are not confirmed; selection stays locked. Poll the execution or inspect the terminal before releasing/reselecting."}),
+        )
     }
 
     /// Filter our framing and echoed wrapper out of the visible terminal stream.
@@ -612,6 +709,7 @@ impl McpState {
 }
 
 fn expire_selections(inner: &mut Inner) {
+    frontend::expire_requests(inner);
     for selection in inner.selections.values_mut() {
         if selection.state == "selecting" && selection.created.elapsed() > Duration::from_secs(3) {
             selection.state = "failed";
@@ -625,6 +723,7 @@ fn expire_selections(inner: &mut Inner) {
 }
 
 fn revoke_inner(inner: &mut Inner, id: &str, state: &'static str, message: &str) -> Vec<u8> {
+    frontend::cancel_requests(inner, Some(id), message);
     inner.revision += 1;
     for selection in inner
         .selections
@@ -912,7 +1011,34 @@ fn dispatch_with_output(
         return Err(AppError::new("bridge authentication failed"));
     }
     match request.method.as_str() {
-        "list_sessions" => Ok((json!({ "sessions": mcp.list(sessions) }), false)),
+        "list_sessions" => Ok((
+            json!({ "sessions": mcp.list(sessions), "permission": mcp.inner.lock().permission }),
+            false,
+        )),
+        "read_terminal" | "get_session_status" | "show_terminal" => {
+            let params: frontend::FrontendParams =
+                serde_json::from_value(request.params).map_err(err)?;
+            Ok((
+                serde_json::to_value(mcp.begin_frontend_request(
+                    sessions,
+                    &request.method,
+                    params,
+                )?)?,
+                true,
+            ))
+        }
+        "frontend_request_status" => {
+            let params: frontend::RequestStatusParams =
+                serde_json::from_value(request.params).map_err(err)?;
+            Ok((
+                serde_json::to_value(mcp.frontend_request_status(&params.request_id)?)?,
+                false,
+            ))
+        }
+        "interrupt_execution" => {
+            let params: StatusParams = serde_json::from_value(request.params).map_err(err)?;
+            Ok((mcp.interrupt(sessions, &params.execution_id)?, true))
+        }
         "select_session" => {
             let params: SessionParams = serde_json::from_value(request.params).map_err(err)?;
             Ok((
@@ -943,8 +1069,11 @@ fn dispatch_with_output(
         }
         "execute" => {
             let params: ExecuteParams = serde_json::from_value(request.params).map_err(err)?;
-            let job = mcp.execute(sessions, &params.session_id, &params.command)?;
-            Ok((serde_json::to_value(job)?, true))
+            match mcp.execute(sessions, &params.session_id, &params.command) {
+                Ok(job) => Ok((serde_json::to_value(job)?, true)),
+                Err(ExecuteError::Blocked(blocked)) => Ok((serde_json::to_value(blocked)?, false)),
+                Err(ExecuteError::App(error)) => Err(error),
+            }
         }
         "execution_status" => {
             let params: StatusParams = serde_json::from_value(request.params).map_err(err)?;
@@ -969,6 +1098,12 @@ pub fn mcp_ui_state(state: State<'_, AppState>) -> UiState {
 #[tauri::command]
 pub fn mcp_executable_path() -> Option<String> {
     std::env::current_exe().ok()?.to_str().map(str::to_owned)
+}
+
+#[tauri::command]
+pub fn mcp_set_permission(app: AppHandle, state: State<'_, AppState>, permission: Permission) {
+    state.mcp.set_permission(permission);
+    changed(&app);
 }
 
 #[tauri::command]

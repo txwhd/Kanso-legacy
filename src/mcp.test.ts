@@ -9,6 +9,8 @@ const mocks = vi.hoisted(() => ({
   release: vi.fn(),
   finish: vi.fn(),
   labels: vi.fn(),
+  finishRequest: vi.fn(),
+  validateRequest: vi.fn(),
   listener: vi.fn(),
   isSending: vi.fn(),
 }));
@@ -18,6 +20,8 @@ vi.mock("./api", () => ({
   mcpReleaseSession: mocks.release,
   mcpFinishSelection: mocks.finish,
   mcpSyncLabels: mocks.labels,
+  mcpFinishRequest: mocks.finishRequest,
+  mcpValidateRequest: mocks.validateRequest,
   onMcpChanged: mocks.listener,
 }));
 vi.mock("./senderSend", () => ({ isSending: mocks.isSending }));
@@ -38,6 +42,8 @@ const controller = {
   mcpSharingBlocker: vi.fn(),
   setMcpShared: vi.fn(),
   dispose: vi.fn(),
+  readMcpTerminal: vi.fn(),
+  mcpTerminalStatus: vi.fn(),
 };
 const other = { ...controller, sessionId: "other", setMcpShared: vi.fn() };
 const tab = {
@@ -47,8 +53,10 @@ const tab = {
 } as Tab;
 const empty: McpUiState = {
   enabled: false,
+  permission: "read_only",
   revision: 0,
   selections: [],
+  requests: [],
   bridgeFile: "bridge-file",
   error: null,
   sessions: [],
@@ -70,6 +78,16 @@ beforeEach(() => {
   vi.resetAllMocks();
   mocks.isSending.mockReturnValue(false);
   mocks.labels.mockResolvedValue(undefined);
+  mocks.finishRequest.mockResolvedValue({ state: "completed" });
+  controller.readMcpTerminal.mockReturnValue({
+    output: "manual output",
+    nextCursor: null,
+  });
+  controller.mcpTerminalStatus.mockReturnValue({
+    readyToSelect: true,
+    selectionBlocker: null,
+    inputLocked: false,
+  });
   mocks.enabled.mockResolvedValue(undefined);
   mocks.release.mockResolvedValue(undefined);
   mocks.snapshot.mockResolvedValue(empty);
@@ -89,6 +107,145 @@ afterEach(() => {
 });
 
 describe("global MCP selection", () => {
+  it("reads terminal pages and queries status without selecting or changing tracking", async () => {
+    let snapshot: McpUiState = {
+      ...empty,
+      enabled: true,
+      revision: 1,
+      requests: [
+        {
+          id: "read",
+          sessionId: "session",
+          method: "read_terminal",
+          params: { maxLines: 12, cursor: "snapshot:24" },
+          state: "pending",
+          result: null,
+          message: null,
+        },
+        {
+          id: "status",
+          sessionId: "session",
+          method: "get_session_status",
+          params: { maxLines: 200, cursor: null },
+          state: "pending",
+          result: null,
+          message: null,
+        },
+      ],
+    };
+    mocks.snapshot.mockImplementation(async () => snapshot);
+    mocks.finishRequest.mockImplementation(async () => {
+      snapshot = { ...snapshot, revision: 2, requests: [] };
+      return { state: "completed" };
+    });
+    stop = watchMcp();
+    await tick();
+    await tick();
+    expect(controller.readMcpTerminal).toHaveBeenCalledWith(12, "snapshot:24");
+    expect(mocks.finishRequest).toHaveBeenCalledWith(
+      "read",
+      { output: "manual output", nextCursor: null },
+      null,
+    );
+    expect(mocks.finishRequest).toHaveBeenCalledWith(
+      "status",
+      expect.objectContaining({
+        readyToSelect: true,
+        senderRunning: false,
+        tabState: "connected",
+      }),
+      null,
+    );
+    expect(controller.prepareMcpSelection).not.toHaveBeenCalled();
+    expect(mocks.finish).not.toHaveBeenCalled();
+    expect(controller.setMcpShared.mock.calls.some(([locked]) => locked)).toBe(
+      false,
+    );
+  });
+
+  it("reports Sender as a selection blocker without trying to recover the terminal", async () => {
+    mocks.isSending.mockReturnValue(true);
+    let snapshot: McpUiState = {
+      ...empty,
+      enabled: true,
+      revision: 1,
+      requests: [
+        {
+          id: "status",
+          sessionId: "session",
+          method: "get_session_status",
+          params: { maxLines: 200, cursor: null },
+          state: "pending",
+          result: null,
+          message: null,
+        },
+      ],
+    };
+    mocks.snapshot.mockImplementation(async () => snapshot);
+    mocks.finishRequest.mockImplementation(async () => {
+      snapshot = { ...snapshot, requests: [], revision: 2 };
+      return { state: "completed" };
+    });
+    stop = watchMcp();
+    await tick();
+    await tick();
+    expect(mocks.finishRequest).toHaveBeenCalledWith(
+      "status",
+      expect.objectContaining({
+        readyToSelect: false,
+        senderRunning: true,
+        selectionBlocker: expect.stringMatching(/Sender/),
+      }),
+      null,
+    );
+    expect(controller.prepareMcpSelection).not.toHaveBeenCalled();
+  });
+
+  it.each(["completed", "failed"])(
+    "activates a tab only after an accepted show request (%s)",
+    async (state) => {
+      const activate = vi
+        .spyOn(useStore.getState(), "setActive")
+        .mockImplementation(() => {});
+      let snapshot: McpUiState = {
+        ...empty,
+        enabled: true,
+        revision: 1,
+        requests: [
+          {
+            id: "show",
+            sessionId: "session",
+            method: "show_terminal",
+            params: { maxLines: 200, cursor: null },
+            state: "pending",
+            result: null,
+            message: null,
+          },
+        ],
+      };
+      mocks.snapshot.mockImplementation(async () => snapshot);
+      mocks.validateRequest.mockImplementation(async () => {
+        expect(activate).not.toHaveBeenCalled();
+        if (state === "failed") {
+          snapshot = { ...snapshot, requests: [], revision: 2 };
+          throw new Error("Request revoked");
+        }
+        return { state: "pending" };
+      });
+      mocks.finishRequest.mockImplementation(async () => {
+        expect(activate).toHaveBeenCalledWith("session");
+        snapshot = { ...snapshot, requests: [], revision: 2 };
+        return { state };
+      });
+      stop = watchMcp();
+      await tick();
+      await tick();
+      expect(activate).toHaveBeenCalledTimes(state === "completed" ? 1 : 0);
+      expect(controller.prepareMcpSelection).not.toHaveBeenCalled();
+      activate.mockRestore();
+    },
+  );
+
   it("enables globally without selecting or locking any controller", async () => {
     await setMcpEnabled(true);
     expect(mocks.enabled).toHaveBeenCalledWith(true);

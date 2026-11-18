@@ -15,6 +15,7 @@
 .mcp-toggle[aria-checked="true"] .mcp-toggle-thumb { background: #fff; transform: translateX(12px); }
 .mcp-toggle:disabled { opacity: .5; cursor: default; }
 .mcp-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mcp-permission { height: 20px; min-width: 62px; padding: 0 4px; font-size: 11px; border-color: var(--border); }
 .dialog.mcp-config-popover { position: fixed; right: 12px; bottom: 34px; z-index: 180; width: min(620px, calc(100vw - 24px)); max-height: calc(100vh - 50px); white-space: normal; }
 .mcp-config-popover .mcp-config-code { min-height: 170px; }
 

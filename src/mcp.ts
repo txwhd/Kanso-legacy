@@ -7,8 +7,10 @@ import { allControllers, getController } from "./terminalRegistry";
 
 export const useMcp = create<api.McpUiState>(() => ({
   enabled: false,
+  permission: "read_only",
   revision: 0,
   selections: [],
+  requests: [],
   bridgeFile: null,
   error: null,
   sessions: [],
@@ -31,6 +33,7 @@ export function watchMcp(): () => void {
   let stopped = false;
   let requestVersion = 0;
   const inFlight = new Set<string>();
+  const requestsInFlight = new Set<string>();
   const reservations = new Map<string, string>();
   let lastLabels = "";
   const syncLabels = () => {
@@ -70,6 +73,89 @@ export function watchMcp(): () => void {
       for (const controller of allControllers()) {
         if (!reservations.has(controller.sessionId))
           controller.setMcpShared(selected.has(controller.sessionId));
+      }
+      const requests = new Set(snapshot.requests.map((request) => request.id));
+      for (const id of requestsInFlight)
+        if (!requests.has(id)) requestsInFlight.delete(id);
+      for (const request of snapshot.requests) {
+        if (requestsInFlight.has(request.id)) continue;
+        requestsInFlight.add(request.id);
+        let result: Record<string, unknown> | null = null;
+        let error: string | null = null;
+        const originalTab = useStore
+          .getState()
+          .tabs.find((tab) => tab.info.id === request.sessionId);
+        try {
+          if (!snapshot.enabled) throw new Error("MCP is disabled");
+          const tab = useStore
+            .getState()
+            .tabs.find((tab) => tab.info.id === request.sessionId);
+          if (!tab || tab.info.kind === "sftp")
+            throw new Error("Terminal tab is no longer open");
+          const controller = getController(request.sessionId);
+          if (request.method === "read_terminal") {
+            if (!controller)
+              throw new Error("Terminal output is not ready yet");
+            result = controller.readMcpTerminal(
+              request.params.maxLines,
+              request.params.cursor,
+            );
+          } else if (request.method === "get_session_status") {
+            const senderRunning = isSending(request.sessionId);
+            const status = controller?.mcpTerminalStatus();
+            result = {
+              ...status,
+              tabState: tab.state,
+              label: tabTitle(tab),
+              controllerReady: Boolean(controller),
+              senderRunning,
+              readyToSelect: Boolean(
+                status?.readyToSelect &&
+                !senderRunning &&
+                tab.state === "connected",
+              ),
+              selectionBlocker:
+                tab.state !== "connected"
+                  ? "Terminal is disconnected"
+                  : senderRunning
+                    ? "Stop Sender before selecting this terminal"
+                    : (status?.selectionBlocker ??
+                      (controller ? null : "Terminal is not ready yet")),
+            };
+          } else {
+            result = { state: "shown" };
+          }
+        } catch (cause) {
+          error = String(cause);
+        }
+        void (async () => {
+          if (request.method === "show_terminal" && !error) {
+            await api.mcpValidateRequest(request.id);
+            const current = useStore
+              .getState()
+              .tabs.find((tab) => tab.info.id === request.sessionId);
+            if (
+              stopped ||
+              !useMcp.getState().enabled ||
+              !current ||
+              current.info !== originalTab?.info
+            ) {
+              return api.mcpFinishRequest(
+                request.id,
+                null,
+                "Terminal changed before it could be shown",
+              );
+            }
+            useStore.getState().setActive(request.sessionId);
+          }
+          return api.mcpFinishRequest(request.id, result, error);
+        })()
+          .catch((cause) => {
+            if (!stopped) useMcp.setState({ error: String(cause) });
+          })
+          .finally(() => {
+            if (!stopped) void refresh();
+          });
       }
       for (const selection of snapshot.selections) {
         if (inFlight.has(selection.id)) continue;
@@ -118,6 +204,12 @@ export function watchMcp(): () => void {
 
 export async function setMcpEnabled(enabled: boolean): Promise<void> {
   await api.mcpSetEnabled(enabled);
+}
+
+export async function setMcpPermission(
+  permission: api.McpPermission,
+): Promise<void> {
+  await api.mcpSetPermission(permission);
 }
 
 export async function takeMcpControl(id: string): Promise<void> {

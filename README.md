@@ -123,6 +123,13 @@ releases one terminal; turning the separate MCP switch off releases all. No dedi
 tools are provided. See the [MCP guide](docs/mcp.md) for client
 configuration, supported shells, and recovery.
 
+MCP can also read recent terminal output with snapshot pagination, inspect
+readiness and lock state, request Ctrl+C for an exact execution ID, and show
+a specified tab. Inspection does not acquire an input lock.
+The global permission selector defaults to Read only. Read/write permits a
+conservative set of ordinary writes; All disables command risk filtering.
+Only the Kanso UI can raise permissions. See the guide for the allowlist and limits.
+
 ## Releases
 
 | Platform | Package |

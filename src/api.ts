@@ -205,6 +205,7 @@ export interface McpExecution {
   exitCode: number | null;
   message: string | null;
   elapsedMs: number;
+  interruptRequested: boolean;
 }
 
 export interface McpSharedSession {
@@ -220,12 +221,16 @@ export interface McpSharedSession {
 
 export interface McpUiState {
   enabled: boolean;
+  permission: McpPermission;
   revision: number;
   selections: McpSelection[];
+  requests: McpFrontendRequest[];
   bridgeFile: string | null;
   error: string | null;
   sessions: McpSharedSession[];
 }
+
+export type McpPermission = "read_only" | "read_write" | "all";
 
 export interface McpSelection {
   id: string;
@@ -234,16 +239,36 @@ export interface McpSelection {
   message: string | null;
 }
 
+export interface McpFrontendRequest {
+  id: string;
+  sessionId: string;
+  method: "read_terminal" | "get_session_status" | "show_terminal";
+  params: { maxLines: number; cursor: string | null };
+  state: "pending" | "completed" | "failed";
+  result: Record<string, unknown> | null;
+  message: string | null;
+}
+
 export const mcpUiState = () => invoke<McpUiState>("mcp_ui_state");
-export const mcpExecutablePath = () => invoke<string | null>("mcp_executable_path");
+export const mcpExecutablePath = () =>
+  invoke<string | null>("mcp_executable_path");
 export const mcpSetEnabled = (enabled: boolean) =>
   invoke<void>("mcp_set_enabled", { enabled });
+export const mcpSetPermission = (permission: McpPermission) =>
+  invoke<void>("mcp_set_permission", { permission });
 export const mcpReleaseSession = (id: string) =>
   invoke<void>("mcp_release_session", { id });
 export const mcpFinishSelection = (id: string, error: string | null) =>
   invoke<McpSelection>("mcp_finish_selection", { id, error });
 export const mcpSyncLabels = (labels: { id: string; name: string }[]) =>
   invoke<void>("mcp_sync_labels", { labels });
+export const mcpFinishRequest = (
+  id: string,
+  result: Record<string, unknown> | null,
+  error: string | null,
+) => invoke<McpFrontendRequest>("mcp_finish_request", { id, result, error });
+export const mcpValidateRequest = (id: string) =>
+  invoke<McpFrontendRequest>("mcp_validate_request", { id });
 export const onMcpChanged = (handler: () => void): Promise<UnlistenFn> =>
   listen("mcp:changed", handler);
 

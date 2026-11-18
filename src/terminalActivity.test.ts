@@ -80,6 +80,69 @@ describe("shell prompt recognition", () => {
 });
 
 describe("terminal command activity", () => {
+  it("queries stale GateShell activity without clearing it or completing waiters", async () => {
+    const states: string[] = [];
+    const controller = createController(states);
+    await write(controller, "Asset number: ");
+    controller.term.input("001", true);
+    await write(controller, "001");
+    controller.term.input("\r", true);
+    await write(controller, "\r\n[root@node1 ~]# ");
+    expect(controller.canShareWithMcp()).toBe(false);
+    expect(controller.mcpTerminalStatus().readyToSelect).toBe(true);
+    expect(controller.mcpTerminalStatus().commandRunning).toBe(true);
+    expect(controller.mcpTerminalStatus().aiActive).toBe(false);
+    expect(controller.canShareWithMcp()).toBe(false);
+    expect(states).toEqual(["running"]);
+    expect(await controller.waitForCommand(1)).toBe("timeout");
+    controller.setPathShell("powershell");
+    expect(controller.mcpTerminalStatus().readyToSelect).toBe(false);
+    expect(controller.mcpTerminalStatus().selectionBlocker).toMatch(/POSIX/);
+  });
+
+  it("reads immutable bounded pages including Unicode/manual output and invalidates cursors on reconnect", async () => {
+    const controller = createController([]);
+    await write(controller, "one\r\n你好\r\nthree\r\nalice@server:~$ ");
+    const page = controller.readMcpTerminal(2);
+    expect(page.output).toBe("three\nalice@server:~$ ");
+    expect(page.nextCursor).not.toBeNull();
+    await write(controller, "\r\nnew output\r\n\x1b[2J\x1b[H");
+    const older = controller.readMcpTerminal(2, page.nextCursor);
+    expect(older.output).toBe("one\n你好");
+    expect(older.nextCursor).toBeNull();
+    controller.setLocked(true);
+    controller.setLocked(false);
+    expect(() => controller.readMcpTerminal(2, page.nextCursor)).toThrow(
+      /cursor/,
+    );
+  });
+
+  it("reads alternate screens below the cursor without sending input or granting selection", async () => {
+    const controller = createController([]);
+    await write(controller, "\x1b[?1049h\x1b[Htop\x1b[5;1Hlast row\x1b[H");
+    expect(controller.readMcpTerminal().output).toContain("last row");
+    expect(controller.readMcpTerminal().bufferType).toBe("alternate");
+    expect(controller.mcpTerminalStatus().readyToSelect).toBe(false);
+    expect(controller.mcpTerminalStatus().selectionBlocker).toMatch(
+      /full-screen/,
+    );
+  });
+
+  it("caps terminal pages and expires snapshots instead of reusing live row indices", async () => {
+    const controller = createController([]);
+    controller.term.options.scrollback = 1000;
+    controller.term.resize(200, 30);
+    await write(controller, ("中".repeat(60) + "\r\n").repeat(350));
+    const page = controller.readMcpTerminal(500);
+    expect(page.output.length).toBeLessThanOrEqual(16000);
+    expect(page.nextCursor).not.toBeNull();
+    expect(() => controller.readMcpTerminal(501)).toThrow(/maxLines/);
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 61_000);
+    expect(() => controller.readMcpTerminal(200, page.nextCursor)).toThrow(
+      /expired/,
+    );
+    now.mockRestore();
+  });
   it("selects a ready POSIX prompt, but rejects unsupported shells and pending edits", async () => {
     const controller = createController([]);
     await write(controller, "alice@server:~$ ");

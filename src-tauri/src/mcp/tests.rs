@@ -12,7 +12,7 @@ fn dispatch(
     dispatch_with_output(mcp, sessions, token, line, |_, _| {})
 }
 
-fn fixture(
+pub(super) fn fixture(
     kind: SessionKind,
 ) -> (
     McpState,
@@ -36,6 +36,122 @@ fn fixture(
     (mcp, sessions, rx)
 }
 
+#[test]
+fn permissions_default_to_read_only_and_block_before_any_terminal_write() {
+    let (mcp, sessions, mut rx) = fixture(SessionKind::Ssh);
+    assert_eq!(mcp.inner.lock().permission, Permission::ReadOnly);
+    mcp.set_enabled(true).unwrap();
+    let claim = mcp.begin_selection(&sessions, "session").unwrap();
+    mcp.finish_selection(&sessions, &claim.id, None).unwrap();
+    for command in [
+        "touch /tmp/new-file",
+        "ls && rm -rf /tmp/a",
+        "ls\nunknown_script",
+        "ls $(echo injected)",
+    ] {
+        let request = json!({"token":"secret","method":"execute","params":{"sessionId":"session","command":command}});
+        let (blocked, changed) = dispatch(
+            &mcp,
+            &sessions,
+            "secret",
+            &serde_json::to_vec(&request).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(blocked["code"], "COMMAND_BLOCKED");
+        assert_eq!(blocked["state"], "blocked");
+        assert_eq!(blocked["permission"], "read_only");
+        assert!(!changed);
+        assert!(rx.try_recv().is_err());
+        assert!(mcp.inner.lock().executions.is_empty());
+    }
+    let job = mcp.execute(&sessions, "session", "pwd; whoami").unwrap();
+    let SessionCommand::Write(bytes) = rx.try_recv().unwrap() else {
+        panic!("expected terminal write")
+    };
+    assert!(String::from_utf8(bytes).unwrap().contains("command"));
+    mcp.output("session", &complete(&job.id, "/root\nroot", 0));
+    assert!(mcp.manual_input("session", || Ok(())).is_err());
+}
+
+#[test]
+fn permission_changes_apply_to_next_submission_without_replaying_or_cancelling() {
+    let (mcp, sessions, mut rx) = fixture(SessionKind::Ssh);
+    mcp.share(&sessions, "session", "target").unwrap();
+    let job = mcp.execute(&sessions, "session", "sleep 60").unwrap();
+    rx.try_recv().unwrap();
+    mcp.set_permission(Permission::ReadOnly);
+    assert_eq!(mcp.execution(&job.id).unwrap().state, "running");
+    assert!(rx.try_recv().is_err());
+    mcp.interrupt(&sessions, &job.id).unwrap();
+    assert!(matches!(rx.try_recv().unwrap(), SessionCommand::Write(bytes) if bytes == b"\x03"));
+    mcp.output("session", &complete(&job.id, "", 130));
+    assert!(matches!(
+        mcp.execute(&sessions, "session", "touch /tmp/a"),
+        Err(ExecuteError::Blocked(_))
+    ));
+    assert!(rx.try_recv().is_err());
+    mcp.set_permission(Permission::ReadWrite);
+    assert!(rx.try_recv().is_err()); // permission changes never replay blocked commands
+    let write = mcp.execute(&sessions, "session", "touch /tmp/a").unwrap();
+    rx.try_recv().unwrap();
+    mcp.output("session", &complete(&write.id, "", 0));
+    assert!(matches!(
+        mcp.execute(&sessions, "session", "rm -rf /tmp/a"),
+        Err(ExecuteError::Blocked(_))
+    ));
+    assert!(rx.try_recv().is_err());
+    mcp.set_permission(Permission::All);
+    let allowed = mcp.execute(&sessions, "session", "rm -rf /tmp/a").unwrap();
+    rx.try_recv().unwrap();
+    mcp.output("session", &complete(&allowed.id, "", 0));
+    let before = mcp.inner.lock().permission;
+    assert!(dispatch(
+        &mcp,
+        &sessions,
+        "secret",
+        br#"{"token":"secret","method":"set_permission","params":{"permission":"all"}}"#
+    )
+    .is_err());
+    assert_eq!(mcp.inner.lock().permission, before);
+    mcp.set_enabled(false).unwrap();
+    mcp.set_enabled(true).unwrap();
+    assert_eq!(mcp.ui_state(&sessions).permission, Permission::All);
+    assert_eq!(
+        McpState::default().inner.lock().permission,
+        Permission::ReadOnly
+    );
+}
+
+#[test]
+fn interrupt_targets_one_current_execution_and_never_unlocks_or_replays() {
+    let (mcp, sessions, mut rx) = fixture(SessionKind::Ssh);
+    mcp.share(&sessions, "session", "target").unwrap();
+    let job = mcp.execute(&sessions, "session", "sleep 60").unwrap();
+    rx.try_recv().unwrap();
+    assert_eq!(
+        mcp.interrupt(&sessions, &job.id).unwrap()["state"],
+        "interrupt_requested"
+    );
+    assert!(matches!(rx.try_recv().unwrap(), SessionCommand::Write(bytes) if bytes == b"\x03"));
+    mcp.interrupt(&sessions, &job.id).unwrap();
+    assert!(rx.try_recv().is_err());
+    assert_eq!(mcp.execution(&job.id).unwrap().state, "running");
+    assert!(mcp.execution(&job.id).unwrap().interrupt_requested);
+    assert!(mcp.manual_input("session", || Ok(())).is_err());
+    assert!(mcp.execute(&sessions, "session", "must not run").is_err());
+    mcp.output("session", &complete(&job.id, "interrupted", 130));
+    assert_eq!(mcp.execution(&job.id).unwrap().exit_code, Some(130));
+    let next = mcp.execute(&sessions, "session", "pwd").unwrap();
+    rx.try_recv().unwrap();
+    assert!(mcp.interrupt(&sessions, &job.id).is_err());
+    assert!(rx.try_recv().is_err());
+    mcp.revoke("session", "interrupted", "takeover");
+    assert!(mcp.interrupt(&sessions, &next.id).is_err());
+    mcp.set_enabled(false).unwrap();
+    assert!(mcp.interrupt(&sessions, &next.id).is_err());
+    assert!(rx.try_recv().is_err());
+}
+
 fn complete(id: &str, output: &str, code: u8) -> Vec<u8> {
     format!("echoed wrapper\r\n\x1eKANSO_MCP_{id}:BEGIN\x1f{output}\x1eKANSO_MCP_{id}:END:{code}\x1fshell$ ").into_bytes()
 }
@@ -48,6 +164,9 @@ impl McpState {
             return Err(AppError::new("invalid label"));
         }
         self.set_enabled(true)?;
+        // Capture/protocol regressions intentionally use unrestricted commands;
+        // permission enforcement has dedicated default/lowering tests below.
+        self.set_permission(Permission::All);
         self.inner.lock().labels.insert(id.into(), label.into());
         let request = self.begin_selection(sessions, id)?;
         if request.state == "selected" {

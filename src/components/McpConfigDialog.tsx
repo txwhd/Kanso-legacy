@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { mcpExecutablePath } from "../api";
 import { useMcp } from "../mcp";
 import { mcpClientConfig, type McpClient } from "../mcpConfig";
+import { MCP_PERMISSIONS } from "../mcpConfig";
 
 export function McpConfigDialog({
   onClose,
@@ -13,6 +14,7 @@ export function McpConfigDialog({
 }) {
   const bridgeFile = useMcp((state) => state.bridgeFile);
   const sessions = useMcp((state) => state.sessions);
+  const permission = useMcp((state) => state.permission);
   const [executable, setExecutable] = useState("");
   const [client, setClient] = useState<McpClient>("codex");
   const [notice, setNotice] = useState("");
@@ -89,6 +91,11 @@ export function McpConfigDialog({
         Kanso MCP · stdio
       </div>
       <div className="dialog-body mcp-config-body">
+        <p>
+          <strong>权限：{MCP_PERMISSIONS[permission].label}</strong> ·{" "}
+          {MCP_PERMISSIONS[permission].description} 仅能在 Kanso
+          中手动切换，重启后恢复只读。
+        </p>
         <p>
           {sessions.length} connected terminals ·{" "}
           {sessions.filter((session) => session.selected).length} selected. Only

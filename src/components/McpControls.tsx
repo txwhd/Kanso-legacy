@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { setMcpEnabled, takeMcpControl, useMcp } from "../mcp";
+import {
+  setMcpEnabled,
+  setMcpPermission,
+  takeMcpControl,
+  useMcp,
+} from "../mcp";
+import type { McpPermission } from "../api";
+import { MCP_PERMISSIONS } from "../mcpConfig";
 import { useStore } from "../store";
 import { McpConfigDialog } from "./McpConfigDialog";
 
@@ -9,6 +16,7 @@ export function McpStatusControl() {
   const enabled = useMcp((state) => state.enabled);
   const bridgeFile = useMcp((state) => state.bridgeFile);
   const bridgeError = useMcp((state) => state.error);
+  const permission = useMcp((state) => state.permission);
   const [busy, setBusy] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
   const [hoverOpen, setHoverOpen] = useState(false);
@@ -32,6 +40,16 @@ export function McpStatusControl() {
     setBusy(true);
     try {
       await setMcpEnabled(!enabled);
+    } catch (error) {
+      useStore.getState().setStatus(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const changePermission = async (value: McpPermission) => {
+    setBusy(true);
+    try {
+      await setMcpPermission(value);
     } catch (error) {
       useStore.getState().setStatus(String(error));
     } finally {
@@ -71,6 +89,22 @@ export function McpStatusControl() {
           <McpConfigDialog popover onClose={closeHover} />
         )}
       </div>
+      <select
+        className="mcp-permission"
+        aria-label="MCP permission"
+        value={permission}
+        disabled={busy || !bridgeFile}
+        title={MCP_PERMISSIONS[permission].description}
+        onChange={(event) =>
+          void changePermission(event.target.value as McpPermission)
+        }
+      >
+        {Object.entries(MCP_PERMISSIONS).map(([value, { label }]) => (
+          <option key={value} value={value}>
+            {label}
+          </option>
+        ))}
+      </select>
       <button
         type="button"
         role="switch"

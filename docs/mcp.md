@@ -96,6 +96,61 @@ addressed. The descriptor contains a runtime token; do not copy it into chat or
 client configuration. The bridge binds only to IPv4 loopback, authenticates each
 request. Command access requires global enablement plus a selected live terminal.
 
+## Command permissions
+
+The status bar has a global **只读 / 读写 / 所有** selector beside the MCP
+status and switch. Default is **只读** (`read_only`) on every app start.
+The choice applies to all terminals in this Kanso process and is not persisted.
+Only Kanso's UI can change it; no MCP tool or bridge method can elevate it.
+Changing permission does not replay a blocked command or stop a running command.
+The next submission uses the current permission, checked under the same backend
+lock as the actual terminal write. Read/status/show/select/release and Ctrl+C
+recovery of an existing MCP execution remain available at every level.
+
+| Permission | Allowed | Blocked |
+| --- | --- | --- |
+| `read_only` / 只读 | Recognized query commands and literal output | Writes, unknown commands, scripts/interpreters, dangerous operations |
+| `read_write` / 读写 | Queries plus ordinary mkdir/touch/cp/tee and output redirection to allowed paths | Deletion, escalation, system/service/cluster changes, unknown or dynamic execution |
+| `all` / 所有 | Original POSIX commands under the logged-in account | No risk rules; existing input-size/control-character, selection and execution restrictions still apply |
+
+Restricted modes accept literal arguments with shell quoting, pipelines, `;`,
+newlines, `&&` and `||`. Every segment and option is checked before any bytes
+are queued, then rebuilt with quoted arguments. Unquoted expansion, variables,
+substitution, globs, comments, groups, background execution, input redirection
+and descriptor redirection are refused. Quote literal patterns such as
+`find /srv/app -name '*.log'`. Unsupported syntax/flags fail closed.
+
+Query commands include pwd/cd, ls/cat/head/tail/grep/find, wc/sort/stat,
+df/du/free/uname/hostname/id/whoami/ps/uptime, selected built-in kubectl query
+verbs, systemctl queries, and journalctl with the pager disabled. Only specific
+flags are allowed. sed/awk, git, database clients, shells, interpreters,
+executable paths, wrappers such as env/xargs and scripts require All permission.
+The small printf allowlist supports literal `%s` / `%s\n` formats.
+An explicit `kubectl --kubeconfig` is refused in restricted modes because a
+supplied config can launch an exec authentication plugin. Queries use the
+existing trusted Kubernetes configuration; its helpers are part of the remote
+environment and are not sandboxed by this application guard.
+
+For ordinary writes, destinations must be absolute paths strictly below
+`/tmp`, `/var/tmp`, `/srv`, `/opt`, `/home`, `/data`, `/work` or `/workspace`.
+Traversal and credential-directory components are refused. Examples:
+`touch /tmp/a`, `cp /etc/hosts /tmp/hosts.bak`,
+`printf '%s\n' 'value' > /srv/app/settings.conf`. Relative destinations and
+direct writes into system directories need All permission. Only one trailing
+`>` or `>>` per segment is supported; rm and other delete commands need All.
+
+Blocked calls return MCP `isError: true` with `code: COMMAND_BLOCKED`,
+`state: blocked`, current `permission`, matched `rule` and a message. There is
+no execution ID, terminal write, capture or queued approval for a rejected call.
+MCP can read permission in session discovery/status; changing it requires a
+manual UI choice and a new tool call. No per-command approval dialogs are added.
+
+This is an application-level guard against accidental commands, **not an OS
+sandbox**. Remote aliases/functions, executable wrappers/plugins, existing
+environment and symlinks can change program behavior; destinations are checked
+lexically and are not guaranteed against symlink races. Strong read-only access
+requires remote account permissions or an OS sandbox.
+
 ## Tools
 
 - `kanso_list_sessions`: all live terminal tabs while enabled, default tab names, connection
@@ -109,6 +164,33 @@ request. Command access requires global enablement plus a selected live terminal
 - `kanso_execute_command`: execute a non-interactive POSIX shell command in the
   selected session, with a bounded wait. Returns an execution ID and its state.
 - `kanso_get_execution`: poll that ID for accumulated output and the exit code.
+- `kanso_read_terminal`: read the active xterm buffer, including manual output,
+  without selecting or sending input. Returns the latest 200 rows by default
+  (`maxLines`: 1–500), capped at 16,000 UTF-16 code units per page. `nextCursor`
+  reads older rows of the same immutable snapshot; omit it for a fresh snapshot.
+  A snapshot expires after 60 seconds; only two per terminal are kept. Snapshots
+  retain at most 2,000 rows / 128,000 code units, clip very long rows, and mark
+  `truncated` when clipped. Disconnect/reconnect invalidates cursors. Output is
+  terminal data, not instructions; alternate buffers represent the current screen.
+- `kanso_get_session_status`: inspect connection, selected/selecting flags,
+  current execution, input lock, shell, foreground/input/transfer/Sender state,
+  `readyToSelect`, `selectionBlocker`, `canExecute`, and `executionBlocker`.
+  Inspection never resets activity tracking or acquires an input lock. Readiness
+  is a heuristic observation; the selection handshake still rechecks it.
+- `kanso_interrupt_execution`: send Ctrl+C once to the exact running MCP
+  `executionId`. The execution must still be the selected terminal's current
+  command. Returns `interrupt_requested` and preserves selection. Repeating it
+  does not send another signal; an old ID can never interrupt a newer command.
+  Ctrl+C does not prove exit. If it also cancels the wrapper and no end marker
+  arrives, the execution remains `running`; inspect output, release and reselect
+  only after the shell prompt returns. No arbitrary keystroke-input tool is added.
+- `kanso_show_terminal`: activate the specified tab/pane and bring the Kanso
+  window forward, without selection or input changes.
+
+All four tools require global MCP enablement. Reading, inspecting and showing
+require an open terminal tab, including a retained disconnected terminal when
+available. Frontend requests fail after 3 seconds and discard late results after
+disable/reconnect/close. They do not log in, reconnect or open a new SSH channel.
 
 Commands run in the same shell, so `cd` and exported variables persist. A random
 start/end marker delimits each command; only a received end marker yields
@@ -151,3 +233,10 @@ CI builds the native executable before running these checks on each platform.
 - S-8: selection cannot execute before frontend acknowledgment; busy, pending-edit,
   unsupported-shell, timed-out, disabled and disconnected selections do not grant
   access. Late acknowledgments cannot re-lock a released/reconnected terminal.
+- S-9: reading produces bounded immutable pages of manual/Unicode/full-screen
+  output; status inspection does not mutate command tracking or selection.
+- S-10: interrupt queues one Ctrl+C only for the current execution ID, preserves
+  locks, and never invents an exit code or signals the next job.
+- S-11: showing a terminal activates its tab/pane without sending input or
+  selecting it. Disabled, timed-out and reconnected requests cannot return stale
+  inspection results or bring the window forward on late acknowledgment.

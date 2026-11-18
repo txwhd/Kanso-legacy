@@ -23,6 +23,7 @@ import { IS_MAC, IS_WINDOWS } from "./platform";
 import { matchAppShortcut } from "./shortcuts";
 import { SEARCH_HIGHLIGHT_LIMIT } from "./terminalSearch";
 import { terminalPathsText, type PathShell } from "./terminalPaths";
+import { TerminalMcpReader } from "./terminalMcp";
 import {
   allowsTableHeaderColors,
   isShellPrompt,
@@ -390,6 +391,7 @@ export class TerminalController {
   private mcpShared = false;
   /** Wait for a paint after input; inputAnchor separately guards pending edits. */
   private mcpInputPending = false;
+  private mcpReader = new TerminalMcpReader();
   private pathShell: PathShell = "posix";
   /** Command history capture + completion popup. Opt-in via the Edit menu. */
   private suggestionsOn = false;
@@ -1141,6 +1143,28 @@ export class TerminalController {
     return this.confirmMcpShellReady();
   }
 
+  /** Inspection must never clear GateShell anchors or cancel Sender waiters. */
+  mcpTerminalStatus() {
+    const readyToSelect = this.pathShell === "posix" && this.hasEmptyShellPrompt()
+      && (this.canShareWithMcp() || this.canConfirmMcpShellReady());
+    return {
+      shell: this.pathShell,
+      bufferType: this.term.buffer.active.type,
+      inputLocked: this.locked || this.mcpShared,
+      commandRunning: this.commandRunning,
+      transferActive: this.isTransferActive(),
+      aiActive: this.aiSession,
+      pendingInput: this.mcpInputPending || (this.inputAnchor !== null && this.anchorOnCursorLine(this.inputAnchor)),
+      readyToSelect,
+      selectionBlocker: readyToSelect ? null : this.mcpSharingBlocker(),
+    };
+  }
+
+  readMcpTerminal(maxLines = 200, cursor?: string | null) {
+    if (this.disposed) throw new Error("This terminal is closed");
+    return this.mcpReader.read(this.term.buffer.active, maxLines, cursor);
+  }
+
   /**
    * Records a command sent outside xterm's keyboard path (the Sender panel).
    * Call immediately before writing it so the current prompt can be used as
@@ -1200,6 +1224,7 @@ export class TerminalController {
   setLocked(locked: boolean) {
     if (this.locked === locked) return;
     this.locked = locked;
+    this.mcpReader.clear();
     this.term.options.disableStdin = locked || this.mcpShared;
     this.term.write(locked ? "\x1b[?25l" : "\x1b[?25h");
     if (locked) {
